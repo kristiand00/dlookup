@@ -3,7 +3,7 @@
 A terminal-based application built with Go and Bubble Tea for performing various DNS lookups (NSLOOKUP, DIG) and WHOIS queries in an interactive, tabbed interface.
 
 ![Screenshot Placeholder](https://via.placeholder.com/800x400.png/282a36/e0e0e0?text=Add+Screenshot+Here)
-*(Suggestion: Replace the placeholder above with an actual screenshot or GIF of the application)*
+
 
 ## Features
 
@@ -38,24 +38,24 @@ A terminal-based application built with Go and Bubble Tea for performing various
 1. **Clone the repository:**
 
     ```bash
-    git clone <repository-url> # Replace <repository-url> with the actual URL
-    cd <repository-directory>   # Replace <repository-directory> with the folder name
+    git clone https://github.com/kristiand00/dlookup.git
+    cd dlookup
     ```
 
 2. **Build the binary:**
   
     ```bash
-    go build -o dns-lookup-tui .
+    go build -o dlookup .
     ```
   
-    This will create an executable file named `dns-lookup-tui` in the current directory.
+    This will create an executable file named `dlookup` in the current directory.
 
 ## Usage
 
 1. **Run the application:**
 
     ```bash
-    ./dns-lookup-tui
+    ./dlookup
     ```
 
     Alternatively, for quick testing without building, you can use:
