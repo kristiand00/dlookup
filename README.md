@@ -2,7 +2,7 @@
 
 A terminal-based application built with Go and Bubble Tea for performing various DNS lookups (NSLOOKUP, DIG) and WHOIS queries in an interactive, tabbed interface.
 
-![Screenshot Placeholder](https://via.placeholder.com/800x400.png/282a36/e0e0e0?text=Add+Screenshot+Here)
+![Screenshot Placeholder](https://github.com/kristiand00/dlookup/blob/main/preview.png?raw=true)
 
 
 ## Features
