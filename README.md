@@ -2,17 +2,20 @@
 
 A terminal-based application built with Go and Bubble Tea for performing various DNS lookups (NSLOOKUP, DIG) and WHOIS queries in an interactive, tabbed interface or via command-line automation.
 
-![Screenshot Placeholder](https://github.com/kristiand00/dlookup/blob/main/preview.png?raw=true)
+![Screenshot Dlookup](https://github.com/kristiand00/dlookup/blob/main/preview.png?raw=true)
 
 ## Features
 
 * **Interactive TUI:** Built using the Charm Bubble Tea library for a rich terminal experience.
-* **Command-Line Mode:** Run a specific lookup type on a list of domains/IPs from a file automatically (e.g., `./dlookup --dig-a domains.txt`).
+* **Command-Line Mode:** Run a specific lookup type on a list of domains/IPs from a file automatically.
 * **Tabbed Interface:** Perform multiple lookups concurrently in different tabs when running interactively.
-* **Multiple Lookup Types:** Supports NSLOOKUP, WHOIS, and various DIG queries (ANY, A, AAAA, MX, TXT, SOA, CNAME).
+* **Multiple Lookup Types:** Supports NSLOOKUP, WHOIS, various DIG queries (ANY, A, AAAA, MX, TXT, SOA, CNAME), and a comprehensive report combining all types.
+* **Comprehensive Report:** A special lookup type that runs all other available lookups for a given domain and presents a combined report.
+* **Watch Mode:** Automatically re-run a single lookup (excluding the comprehensive report) at a specified interval.
+* **Configurable Keybindings:** Customize key actions via a YAML configuration file.
 * **Command Availability Check:** Warns if required external tools (`nslookup`, `dig`, `whois`) are missing.
 * **Scrollable Results:** View lookup outputs in a scrollable viewport.
-* **Keyboard Navigation:** Easy navigation using keyboard shortcuts in interactive mode.
+* **Keyboard Navigation:** Easy navigation using keyboard shortcuts in interactive mode (customizable).
 
 ## Prerequisites
 
@@ -32,15 +35,40 @@ A terminal-based application built with Go and Bubble Tea for performing various
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/kristiand00/dlookup.git](https://github.com/kristiand00/dlookup.git)
+    git clone https://github.com/kristiand00/dlookup.git
     cd dlookup
     ```
 
-2.  **Build the binary:**
+2.  **Get Dependencies:**
+    ```bash
+    go mod tidy
+    ```
+
+3.  **Build the binary:**
     ```bash
     go build -o dlookup .
     ```
-    This will create an executable file named `dlookup` in the current directory. (The `go build` command works the same way on macOS and Linux).
+    This will create an executable file named `dlookup` in the current directory.
+
+## Configuration
+
+The application uses a configuration file located at `~/.config/dlookup/config.yaml` . The first time you run `dlookup`, if this file doesn't exist, it will be created with default settings.
+
+You can edit this file to customize keybindings. The default configuration looks like this:
+
+```yaml
+keybindings:
+  quit: c
+  new_tab: n
+  close_tab: w
+  next_tab: right
+  prev_tab: left
+  back: q
+  confirm: enter
+  watch_toggle: w
+```
+
+Refer to the Bubble Tea documentation for supported key combinations (e.g., `ctrl+a`, `alt+b`, `f1`, `space`, etc.).
 
 ## Usage
 
@@ -65,6 +93,7 @@ You can run the application in two main ways:
    * `--dig-soa`
    * `--dig-cname`
    * `--whois`
+   * `--report`
 
    **Examples:**
    ```bash
@@ -76,6 +105,9 @@ You can run the application in two main ways:
 
    # Run WHOIS lookup on IPs in ip-list.txt
    ./dlookup --whois ip-list.txt
+
+   # Run the comprehensive report on domains in list.txt
+   ./dlookup --report list.txt
    ```
    **Note:** Only one lookup type flag (e.g., `--nslookup`, `--dig-a`) can be used at a time.
 
@@ -91,30 +123,37 @@ You can run the application in two main ways:
    You can also run directly without building:
    ```bash
    # Interactive mode
-   go run main.go
+   go run main.go config.go
 
    # Command-line mode
-   go run main.go --nslookup domains.txt
+   go run main.go config.go --nslookup domains.txt
    ```
 
 ## Keybindings (Interactive Mode)
 
+The keybindings listed below are the *defaults*. They can be changed by editing the configuration file (`~/.config/dlookup/config.yaml`). The help bar at the bottom of the TUI will always reflect the *currently configured* keybindings.
+
 * **General:**
-    * `Ctrl+C`: Quit the application.
-    * `Ctrl+N`: Open a new tab.
-    * `Ctrl+W`: Close the current tab.
-    * `Ctrl+L` / `Ctrl+Right`: Switch to the next tab.
-    * `Ctrl+H` / `Ctrl+Left`: Switch to the previous tab.
+    * `C`: Quit (Default: `c`)
+    * `N`: New Tab (Default: `n`)
+    * `W`: Close Tab (Default: `w`)
+    * `Right`: Next Tab (Default: `right`)
+    * `Left`: Previous Tab (Default: `left`)
 * **Input Domain/IP:**
     * Type the domain name or IP address.
-    * `Enter`: Proceed to lookup type selection.
+    * `Enter`: Confirm Input (Default: `enter`)
 * **Select Lookup Type:**
-    * `↑` / `↓`: Navigate the list of lookup types.
-    * `Enter`: Select the highlighted type and run the lookup.
-    * `Esc`: Go back to the domain/IP input screen.
+    * `↑` / `↓`: Navigate the list.
+    * `Enter`: Confirm Selection (Default: `enter`)
+    * `Q`: Back (Default: `q`)
 * **View Results / Error:**
     * `↑` / `↓` / `PageUp` / `PageDown` / `j` / `k`: Scroll through the output.
-    * `Esc` / `q`: Go back to the domain/IP input screen for the current tab (keeps the domain).
+    * `W`: Watch Mode Toggle (Default: `w`) - *Not available for Report*
+    * `Q`: Back (Default: `q`) - Stops watch mode if active.
+* **Watch Interval Input:**
+    * Type the interval in seconds.
+    * `Enter`: Confirm Interval (Default: `enter`)
+    * `Q`: Cancel Watch (Default: `q`)
 
 ## License
 
@@ -123,3 +162,4 @@ This project is licensed under the MIT License - see the `LICENSE` file for deta
 ## Acknowledgements
 
 * [Charm](https://charm.sh/) - For the excellent Bubble Tea and Lipgloss libraries that make building TUIs in Go enjoyable.
+* [go-yaml/yaml](https://github.com/go-yaml/yaml) - For the YAML parsing library.
