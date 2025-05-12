@@ -344,12 +344,6 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 				if m.lookupType != lookup.ComprehensiveReportName {
 					m.lastState = m.state
 					m.state = stateWatchIntervalInput
-
-					if m.watchInterval > 0 {
-						m.intervalInput.SetValue(strconv.Itoa(int(m.watchInterval.Seconds())))
-					} else {
-						m.intervalInput.SetValue("")
-					}
 					m.intervalInput.Focus()
 					m.intervalInput.CursorEnd()
 					cmds = append(cmds, textinput.Blink)
@@ -1016,7 +1010,7 @@ func main() {
 	// --- Initialize and Run Bubble Tea Program ---
 	// Pass domains, selected lookup provider name (if any), and loaded config
 	m := initialMainModel(initialDomains, selectedLookupProviderName, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		// Use log.Fatalf to print error and exit(1)
