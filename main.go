@@ -733,6 +733,17 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		keyHandledGlobally := false
 		k := m.config.Keybindings
+
+		// Ignore global hotkeys if text input is focused in the active tab
+		if m.activeTab >= 0 && m.activeTab < len(m.tabs) && m.tabs[m.activeTab].textInput.Focused() {
+			// Pass the key event to the tab's Update only
+			var updatedTab tabModel
+			updatedTab, cmd = m.tabs[m.activeTab].Update(msg, k)
+			m.tabs[m.activeTab] = updatedTab
+			cmds = append(cmds, cmd)
+			return m, tea.Batch(cmds...)
+		}
+
 		switch msg.String() {
 		case k.Quit:
 			return m, tea.Quit

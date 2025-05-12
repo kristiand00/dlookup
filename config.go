@@ -32,14 +32,14 @@ type AppConfig struct {
 // Includes macOS-friendly alternatives for tab switching.
 func DefaultKeybindings() Keybindings {
 	return Keybindings{
-		Quit:        "c",     // Changed from ctrl+c
-		NewTab:      "n",     // Changed from ctrl+n
-		CloseTab:    "w",     // Changed from ctrl+w
-		NextTab:     "right", // Changed from alt+l
-		PrevTab:     "left",  // Changed from alt+h
-		Back:        "q",     // Changed from esc
-		Confirm:     "enter", // Unchanged
-		WatchToggle: "w",     // Unchanged
+		Quit:        "ctrl+c", // Changed from c to ctrl+c
+		NewTab:      "n",      // Changed from ctrl+n
+		CloseTab:    "w",      // Changed from ctrl+w
+		NextTab:     "right",  // Changed from alt+l
+		PrevTab:     "left",   // Changed from alt+h
+		Back:        "q",      // Changed from esc
+		Confirm:     "enter",  // Unchanged
+		WatchToggle: "w",      // Unchanged
 	}
 }
 
