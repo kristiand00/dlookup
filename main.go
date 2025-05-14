@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -126,6 +127,7 @@ const (
 	stateViewResults
 	stateError
 	stateWatchIntervalInput
+	stateExportFilenameInput
 )
 
 type lookupItem string
@@ -176,6 +178,8 @@ type tabModel struct {
 	watchInterval time.Duration
 	intervalInput textinput.Model
 	lastState     tabState
+	exportInput   textinput.Model
+	exportMsg     string
 }
 
 func newTabModel(width, height int, initialDomain string, initialLookupType string) tabModel {
@@ -212,6 +216,11 @@ func newTabModel(width, height int, initialDomain string, initialLookupType stri
 	intervalInput.CharLimit = 5
 	intervalInput.Width = 20
 
+	exportInput := textinput.New()
+	exportInput.Placeholder = "path/to/filename.txt"
+	exportInput.CharLimit = 256
+	exportInput.Width = max(50, width-10)
+
 	m := tabModel{
 		id:            nextTabID,
 		textInput:     ti,
@@ -222,6 +231,7 @@ func newTabModel(width, height int, initialDomain string, initialLookupType stri
 		domain:        initialDomain,
 		isWatching:    false,
 		intervalInput: intervalInput,
+		exportInput:   exportInput,
 		lastState:     stateInputDomain,
 	}
 	nextTabID++
@@ -350,6 +360,15 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 					m.setSize(m.width, m.height)
 					return m, tea.Batch(cmds...)
 				}
+			case k.Export:
+				m.lastState = m.state
+				m.state = stateExportFilenameInput
+				m.exportInput.SetValue("") // Clear previous value
+				m.exportInput.Focus()
+				m.exportMsg = "" // Clear previous message
+				cmds = append(cmds, textinput.Blink)
+				m.setSize(m.width, m.height)
+				return m, tea.Batch(cmds...)
 			}
 		}
 
@@ -437,6 +456,74 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 			default:
 
 				m.intervalInput, cmd = m.intervalInput.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		case stateExportFilenameInput:
+			switch msg.String() {
+			case k.Confirm:
+				filename := strings.TrimSpace(m.exportInput.Value())
+				if filename != "" {
+					// Expand tilde (~) if present
+					if strings.HasPrefix(filename, "~/") || filename == "~" {
+						homeDir, err := os.UserHomeDir()
+						if err != nil {
+							m.exportMsg = fmt.Sprintf("Error getting home dir: %v", err)
+							cmd = textinput.Blink
+							cmds = append(cmds, cmd)
+							return m, tea.Batch(cmds...) // Stop processing
+						}
+						if filename == "~" {
+							filename = homeDir // Just the home directory
+						} else {
+							filename = filepath.Join(homeDir, filename[2:]) // Join home dir and the rest
+						}
+					}
+
+					contentToSave := ""
+					if m.lastState == stateViewResults {
+						contentToSave = m.result
+					} else if m.lastState == stateError {
+						header := fmt.Sprintf("Error running %s for %s", m.lookupType, m.domain)
+						if m.isWatching {
+							header += fmt.Sprintf(" [Watching: %s]", m.watchInterval)
+						}
+						contentToSave = fmt.Sprintf("%s\nError:\n%v", header, m.err)
+					} else {
+						// Should not happen, but handle gracefully
+						contentToSave = "Error: Cannot determine content to export."
+					}
+
+					// Ensure directory exists before writing
+					dir := filepath.Dir(filename)
+					if err := os.MkdirAll(dir, 0750); err != nil {
+						m.exportMsg = fmt.Sprintf("Error creating dir %s: %v", dir, err)
+						cmd = textinput.Blink
+						cmds = append(cmds, cmd)
+						return m, tea.Batch(cmds...) // Stop processing
+					}
+
+					err := os.WriteFile(filename, []byte(contentToSave), 0644)
+					if err != nil {
+						m.exportMsg = fmt.Sprintf("Error saving to %s: %v", filename, err)
+						m.exportInput.SetValue("Error!")
+						cmd = textinput.Blink
+					} else {
+						m.exportMsg = fmt.Sprintf("Saved to %s", filename)
+						m.state = m.lastState // Return to previous state on success
+						m.exportInput.Blur()
+						m.setSize(m.width, m.height)
+					}
+				} else {
+					m.exportInput.SetValue("Filename cannot be empty!")
+					cmd = textinput.Blink
+				}
+			case k.Back: // Or Esc key
+				m.state = m.lastState
+				m.exportInput.Blur()
+				m.exportMsg = "" // Clear message on cancel
+				m.setSize(m.width, m.height)
+			default:
+				m.exportInput, cmd = m.exportInput.Update(msg)
 				cmds = append(cmds, cmd)
 			}
 		case stateViewResults, stateError:
@@ -573,6 +660,30 @@ func (m tabModel) View() string {
 		availableWidth := m.width
 
 		modalView := modalStyle.Render(modalContent)
+		centeredModal := lipgloss.Place(availableWidth, availableHeight, lipgloss.Center, lipgloss.Center, modalView)
+		b.WriteString(centeredModal)
+	case stateExportFilenameInput:
+		// Render the main content area (e.g., the result view) dimmed or blurred if possible
+		// (Simple approach: just render the modal over whatever was there)
+		// b.WriteString(dimmedStyle.Render(m.renderPreviousStateView())) // Advanced: Render previous state dimmed
+
+		modalWidth := max(60, m.width/2)
+		modalHeight := 5
+		prompt := "Enter filename/path to export results:"
+		if m.exportMsg != "" {
+			prompt = m.exportMsg // Show success/error message
+		}
+		modalContent := fmt.Sprintf("%s\n%s\n(Enter to save, Esc to cancel)", prompt, m.exportInput.View())
+		modalStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorGreen). // Use a different color for export
+			Padding(1, 2).Width(modalWidth).Height(modalHeight)
+
+		availableHeight := m.height - 2 // Adjust based on layout
+		availableWidth := m.width
+
+		modalView := modalStyle.Render(modalContent)
+		// Place the modal in the center of the screen
 		centeredModal := lipgloss.Place(availableWidth, availableHeight, lipgloss.Center, lipgloss.Center, modalView)
 		b.WriteString(centeredModal)
 	}
@@ -729,7 +840,11 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		k := m.config.Keybindings
 
 		// Ignore global hotkeys if text input is focused in the active tab
-		if m.activeTab >= 0 && m.activeTab < len(m.tabs) && m.tabs[m.activeTab].textInput.Focused() {
+		// Check domain input, interval input, and export input
+		if m.activeTab >= 0 && m.activeTab < len(m.tabs) &&
+			(m.tabs[m.activeTab].textInput.Focused() ||
+				m.tabs[m.activeTab].intervalInput.Focused() ||
+				m.tabs[m.activeTab].exportInput.Focused()) {
 			// Pass the key event to the tab's Update only
 			var updatedTab tabModel
 			updatedTab, cmd = m.tabs[m.activeTab].Update(msg, k)
@@ -891,6 +1006,10 @@ func (m mainModel) View() string {
 		if (activeTabState == stateViewResults || activeTabState == stateError) &&
 			activeLookupType != lookup.ComprehensiveReportName {
 			helpParts = append(helpParts, fmt.Sprintf("%s Watch", helpKeyStyle.Render(k.WatchToggle+":")))
+			// Add Export help if applicable
+			if activeTabState == stateViewResults || activeTabState == stateError {
+				helpParts = append(helpParts, fmt.Sprintf("%s Export", helpKeyStyle.Render(k.Export+":")))
+			}
 		}
 	}
 

@@ -19,6 +19,7 @@ type Keybindings struct {
 	Back        string `yaml:"back"`         // Esc key in most contexts
 	Confirm     string `yaml:"confirm"`      // Enter key in most contexts
 	WatchToggle string `yaml:"watch_toggle"` // Key to toggle watch mode input
+	Export      string `yaml:"export"`       // Key to trigger file export
 	// Potentially add keys for list navigation, viewport scrolling if needed
 }
 
@@ -40,6 +41,7 @@ func DefaultKeybindings() Keybindings {
 		Back:        "q",      // Changed from esc
 		Confirm:     "enter",  // Unchanged
 		WatchToggle: "w",      // Unchanged
+		Export:      "ctrl+x", // Default export key
 	}
 }
 
