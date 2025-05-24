@@ -1,0 +1,46 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create a release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24' # Specify your Go version
+
+      - name: Build for Linux (amd64)
+        run: GOOS=linux GOARCH=amd64 go build -o dlookup-linux-amd64 main.go
+      - name: Build for Linux (arm64)
+        run: GOOS=linux GOARCH=arm64 go build -o dlookup-linux-arm64 main.go
+      - name: Build for macOS (amd64)
+        run: GOOS=darwin GOARCH=amd64 go build -o dlookup-macos-amd64 main.go
+      - name: Build for macOS (arm64)
+        run: GOOS=darwin GOARCH=arm64 go build -o dlookup-macos-arm64 main.go
+      - name: Build for Windows (amd64)
+        run: GOOS=windows GOARCH=amd64 go build -o dlookup-windows-amd64.exe main.go
+      - name: Build for Windows (arm64)
+        run: GOOS=windows GOARCH=arm64 go build -o dlookup-windows-arm64.exe main.go
+
+      - name: Create Release and Upload Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dlookup-linux-amd64
+            dlookup-linux-arm64
+            dlookup-macos-amd64
+            dlookup-macos-arm64
+            dlookup-windows-amd64.exe
+            dlookup-windows-arm64.exe
+          fail_on_unmatched_files: true
