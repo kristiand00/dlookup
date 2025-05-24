@@ -33,18 +33,30 @@ A terminal-based application built with Go and Bubble Tea for performing various
 
 ## Installation
 
+### From GitHub Releases
+
+Pre-compiled binaries for various operating systems and architectures are available on the [GitHub Releases page](https://github.com/kristiand00/dlookup/releases).
+
+1. Go to the [Releases page](https://github.com/kristiand00/dlookup/releases).
+2. Download the appropriate binary for your system (e.g., `dlookup-linux-amd64`, `dlookup-windows-amd64.exe`).
+3. (Optional but recommended) Rename the downloaded file to `dlookup` (or `dlookup.exe` on Windows) for easier use.
+4. Make the binary executable (on Linux/macOS): `chmod +x dlookup`
+5. You can now run the application, e.g., `./dlookup` or add it to your system's PATH.
+
+### From Source
+
 1.  **Clone the repository:**
     ```bash
     git clone https://github.com/kristiand00/dlookup.git
     cd dlookup
     ```
 
-2.  **Get Dependencies:**
+2.  **Get Dependencies (if building from source):**
     ```bash
     go mod tidy
     ```
 
-3.  **Build the binary:**
+3.  **Build the binary (if building from source):**
     ```bash
     go build -o dlookup .
     ```
