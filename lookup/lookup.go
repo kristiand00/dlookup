@@ -89,6 +89,26 @@ func checkCommand(cmdName string) bool {
 	return available
 }
 
+// LookupCheckCommandFunc is a function variable that wraps the command checking logic.
+// Tests can replace this with a mock implementation.
+var LookupCheckCommandFunc = internalCheckCommand
+
+// internalCheckCommand is the actual implementation for checking command availability.
+func internalCheckCommand(cmdName string) bool {
+	cmdCheckMutex.Lock()
+	defer cmdCheckMutex.Unlock()
+
+	if available, checked := commandsAvailable[cmdName]; checked {
+		return available
+	}
+
+	_, err := exec.LookPath(cmdName)
+	available := (err == nil)
+	commandsAvailable[cmdName] = available
+	return available
+}
+
+
 func checkAllCommandsOnce() {
 	initialCmdCheck.Do(func() {
 		requiredCmds := make(map[string]struct{})
@@ -105,44 +125,59 @@ func checkAllCommandsOnce() {
 		}
 		registryMutex.RUnlock()
 		for cmdName := range requiredCmds {
-			checkCommand(cmdName)
+			LookupCheckCommandFunc(cmdName) // Use the mockable function
 		}
 	})
 }
 
-func runCommand(cmdName string, args ...string) (string, error) {
+// osRunCommandInternal is the actual implementation that executes a command.
+// It returns the raw output (potentially combined stdout/stderr) and raw error.
+func osRunCommandInternal(cmdName string, args ...string) (string, error) {
 	cmd := exec.Command(cmdName, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := cmd.Run() // This is the raw error from the command execution
+
 	output := strings.TrimSpace(stdout.String())
 	errMsg := strings.TrimSpace(stderr.String())
-	finalOutput := output
 
+	// Combine stdout and stderr into a single output string for simplicity if needed by caller
+	// Or, could return them separately if RunCommand is made to handle it.
+	// For now, stick to current combined behavior if errMsg is present.
+	finalOutput := output
 	if errMsg != "" {
 		if output != "" {
-			finalOutput = fmt.Sprintf(`STDERR:
-%s
-
-STDOUT:
-%s`, errMsg, output)
+			finalOutput = fmt.Sprintf("STDOUT:\n%s\nSTDERR:\n%s", output, errMsg) // Adjusted format slightly for clarity
 		} else {
-			finalOutput = fmt.Sprintf(`STDERR:
-%s`, errMsg)
+			finalOutput = fmt.Sprintf("STDERR:\n%s", errMsg)
 		}
 	}
-	if err != nil {
-		detail := fmt.Errorf("command '%s %s' failed: %w", cmdName, strings.Join(args, " "), err)
-		if errMsg != "" {
-			detail = fmt.Errorf(`%w
-STDERR was:
-%s`, detail, errMsg)
-		}
-		return finalOutput, detail
+	return finalOutput, err // Return raw output and raw error
+}
+
+// OsRunCommand is a variable that holds the function to execute commands.
+// Tests can replace this with a mock implementation. It should adhere to returning raw output and raw error.
+var OsRunCommand = osRunCommandInternal
+
+// RunCommand executes a command using the function assigned to OsRunCommand,
+// then applies transformations (error wrapping, "No results found").
+func RunCommand(cmdName string, args ...string) (string, error) {
+	rawOutput, rawErr := OsRunCommand(cmdName, args...)
+
+	if rawErr != nil {
+		// Error wrapping logic, potentially including rawOutput if it's stderr
+		// Based on previous osRunCommandInternal, rawOutput might already contain stderr.
+		// Let's assume rawOutput is the string to return alongside the error.
+		detail := fmt.Errorf("command '%s %s' failed: %w", cmdName, strings.Join(args, " "), rawErr)
+		// If rawOutput contains actual stderr info (as per osRunCommandInternal's old logic),
+		// it might need to be appended to 'detail' or handled.
+		// For now, the tests set rawOutput to "error output" in failure cases.
+		return rawOutput, detail
 	}
-	if finalOutput == "" {
-		finalOutput = "(No results found)"
+
+	if rawOutput == "" {
+		return "(No results found)", nil
 	}
-	return finalOutput, nil
+	return rawOutput, nil
 }
