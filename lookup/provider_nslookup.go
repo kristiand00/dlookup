@@ -20,11 +20,11 @@ func (p *NslookupProvider) Execute(domain string) (string, error) {
 	if !p.CheckAvailability() {
 		return "", fmt.Errorf("command not found: nslookup")
 	}
-	return runCommand("nslookup", domain)
+	return RunCommand("nslookup", domain) // Use exported RunCommand
 }
 
 func (p *NslookupProvider) CheckAvailability() bool {
-	return checkCommand("nslookup")
+	return LookupCheckCommandFunc("nslookup") // Use the mockable function
 }
 
 func init() {

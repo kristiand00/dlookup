@@ -21,11 +21,11 @@ func (p *WhoisProvider) Execute(domain string) (string, error) {
 		return "", fmt.Errorf("command not found: whois")
 	}
 
-	return runCommand("whois", domain)
+	return RunCommand("whois", domain) // Use exported RunCommand
 }
 
 func (p *WhoisProvider) CheckAvailability() bool {
-	return checkCommand("whois")
+	return LookupCheckCommandFunc("whois") // Use the mockable function
 }
 
 func init() {

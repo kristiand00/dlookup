@@ -45,11 +45,12 @@ func (p *DigProvider) Execute(domain string) (string, error) {
 		return "", fmt.Errorf("command not found: dig")
 	}
 	fullArgs := append([]string{domain}, p.args...)
-	return runCommand("dig", fullArgs...)
+	// Use the new exported RunCommand which allows mocking
+	return RunCommand("dig", fullArgs...)
 }
 
 func (p *DigProvider) CheckAvailability() bool {
-	return checkCommand("dig")
+	return LookupCheckCommandFunc("dig") // Use the mockable function
 }
 
 func init() {

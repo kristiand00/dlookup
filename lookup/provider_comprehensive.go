@@ -27,8 +27,29 @@ func (p *ComprehensiveProvider) CheckAvailability() bool {
 }
 
 func (p *ComprehensiveProvider) Execute(domain string) (string, error) {
+	results := make(map[string]string)
+	providers := AvailableProviders() // Assuming AvailableProviders() is a function in the lookup package
 
-	return "", fmt.Errorf("comprehensive provider Execute() should not be called directly")
+	for _, provider := range providers {
+		if provider.Name() == ComprehensiveReportName {
+			continue // Skip self
+		}
+		if !provider.CheckAvailability() {
+			// Optionally, decide if you want to report unavailable providers
+			// results[provider.Name()] = "Error: Provider not available"
+			continue
+		}
+
+		output, err := provider.Execute(domain)
+		if err != nil {
+			results[provider.Name()] = fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
+		} else {
+			results[provider.Name()] = output
+		}
+	}
+
+	order := GetComprehensiveReportOrder()
+	return FormatComprehensiveReport(domain, results, order), nil
 }
 
 func FormatComprehensiveReport(domain string, results map[string]string, order []string) string {
