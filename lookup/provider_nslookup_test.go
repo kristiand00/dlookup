@@ -1,6 +1,7 @@
 package lookup_test
 
 import (
+	"context"
 	"dlookup/lookup"
 	"fmt"
 	"strings"
@@ -73,13 +74,13 @@ func TestNslookupProvider_Execute(t *testing.T) {
 	// Test Case 1: Successful execution
 	t.Run("Success", func(t *testing.T) {
 		expectedOutput := "Mocked nslookup output for " + domainToTest
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return expectedOutput, nil
 		}
 
-		output, err := provider.Execute(domainToTest)
+		output, err := provider.Execute(context.Background(), domainToTest, lookup.Options{})
 		if err != nil {
 			t.Errorf("Execute() error = %v, want nil", err)
 		}
@@ -98,13 +99,13 @@ func TestNslookupProvider_Execute(t *testing.T) {
 	// Test Case 2: Command execution failure
 	t.Run("CommandFailure", func(t *testing.T) {
 		mockError := fmt.Errorf("mocked nslookup error")
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return "error nslookup output", mockError
 		}
 
-		output, err := provider.Execute(domainToTest)
+		output, err := provider.Execute(context.Background(), domainToTest, lookup.Options{})
 		if err == nil {
 			t.Fatalf("Execute() error = nil, want non-nil")
 		}
@@ -126,13 +127,13 @@ func TestNslookupProvider_Execute(t *testing.T) {
 	t.Run("NoOutput", func(t *testing.T) {
 		// RunCommand should convert empty raw output to "(No results found)"
 		expectedOutput := "(No results found)"
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return "", nil // Mock OsRunCommand returns empty string and nil error
 		}
 
-		output, err := provider.Execute("nodata.example.com")
+		output, err := provider.Execute(context.Background(), "nodata.example.com", lookup.Options{})
 		if err != nil {
 			t.Errorf("Execute() error = %v, want nil", err)
 		}

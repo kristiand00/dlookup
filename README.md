@@ -1,177 +1,151 @@
 # DNS & WHOIS Lookup TUI
 
-A terminal-based application built with Go and Bubble Tea for performing various DNS lookups (NSLOOKUP, DIG) and WHOIS queries in an interactive, tabbed interface or via command-line automation.
+A terminal application built with Go and Bubble Tea for DNS lookups, RDAP/WHOIS queries and watching records change — in an interactive, tabbed TUI or headless for scripts.
 
 ![Screenshot Dlookup](https://github.com/kristiand00/dlookup/blob/main/preview.png?raw=true)
 
 ## Features
 
-* **Interactive TUI:** Built using the Charm Bubble Tea library for a rich terminal experience.
-* **Command-Line Mode:** Run a specific lookup type on a list of domains/IPs from a file automatically.
-* **Tabbed Interface:** Perform multiple lookups concurrently in different tabs when running interactively.
-* **Multiple Lookup Types:** Supports NSLOOKUP, WHOIS, various DIG queries (ANY, A, AAAA, MX, TXT, SOA, CNAME), and a comprehensive report combining all types.
-* **Comprehensive Report:** A special lookup type that runs all other available lookups for a given domain and presents a combined report.
-* **Watch Mode:** Automatically re-run a single lookup (excluding the comprehensive report) at a specified interval.
-* **Configurable Keybindings:** Customize key actions via a YAML configuration file.
-* **Command Availability Check:** Warns if required external tools (`nslookup`, `dig`, `whois`) are missing.
-* **Scrollable Results:** View lookup outputs in a scrollable viewport.
-* **Keyboard Navigation:** Easy navigation using keyboard shortcuts in interactive mode (customizable).
+* **Interactive TUI** with tabs — one per domain/IP, all lookups run in parallel (at most 8 at once).
+* **Native DNS** — A, AAAA, CNAME, MX, NS, SOA, TXT, CAA, PTR, SPF, DMARC and ANY are resolved in Go (no `dig` needed). PTR on an IP does a reverse lookup.
+* **RDAP** — structured registration data over HTTPS (registrar, status, dates, nameservers; network/range/country for IPs).
+* **NSLOOKUP / WHOIS** via the system tools, if installed.
+* **Comprehensive Report** — runs every lookup for a target and combines the results.
+* **Watch mode** — re-run a lookup on an interval; new lines are highlighted (`+`), removed ones listed (`-`), and background tabs that changed get a `●` marker.
+* **Custom DNS server** — per tab in the TUI (`s`) or with `--server`.
+* **Headless mode** — `-o text|json` prints results and exits, for scripting and pipelines.
+* **Export & copy** — save one tab or all tabs to a file, or copy the result to the clipboard.
+* **Configurable keybindings** via YAML, with conflict detection.
 
 ## Prerequisites
 
-1.  **Go:** Version 1.18 or higher recommended. ([Installation Guide](https://go.dev/doc/install))
-2.  **External Tools:** The program relies on standard command-line utilities. You need to have `nslookup`, `dig`, and `whois` installed and available in your system's PATH.
-    * **Debian/Ubuntu:**
-        ```bash
-        sudo apt update && sudo apt install dnsutils whois
-        ```
-    * **Fedora/CentOS/RHEL:**
-        ```bash
-        sudo yum update && sudo yum install bind-utils whois
-        ```
-    * **macOS:** `nslookup` and `whois` are typically included. `dig` might need to be installed (e.g., via Homebrew using the `bind` package which includes `dig`: `brew install bind`). Verify all three commands are accessible in your PATH.
+DNS and RDAP lookups need nothing extra. The `NSLOOKUP` and `WHOIS` lookups need those commands on your `PATH`:
+
+* **Debian/Ubuntu:** `sudo apt install dnsutils whois`
+* **Fedora/RHEL:** `sudo dnf install bind-utils whois`
+* **macOS:** both are included.
+
+DNS queries go to the servers in `/etc/resolv.conf`. Where that file doesn't exist (Windows), dlookup falls back to `1.1.1.1` and `8.8.8.8` — pass `--server` to use a different resolver.
 
 ## Installation
 
 ### From GitHub Releases
 
-Pre-compiled binaries for various operating systems and architectures are available on the [GitHub Releases page](https://github.com/kristiand00/dlookup/releases).
+Download the archive for your platform from the [Releases page](https://github.com/kristiand00/dlookup/releases), e.g. `dlookup_<version>_darwin_arm64.tar.gz`, `dlookup_<version>_linux_amd64.tar.gz` or `dlookup_<version>_windows_amd64.zip`. Verify it against `checksums.txt`, extract it, and put `dlookup` on your `PATH`.
 
-1. Go to the [Releases page](https://github.com/kristiand00/dlookup/releases).
-2. Download the appropriate binary for your system (e.g., `dlookup-linux-amd64`, `dlookup-windows-amd64.exe`).
-3. (Optional but recommended) Rename the downloaded file to `dlookup` (or `dlookup.exe` on Windows) for easier use.
-4. Make the binary executable (on Linux/macOS): `chmod +x dlookup`
-5. You can now run the application, e.g., `./dlookup` or add it to your system's PATH.
+> Releases before this change shipped raw binaries named like `dlookup-macos-arm64`; they are now archives with `darwin` instead of `macos`.
 
-### From Source
+### From source
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/kristiand00/dlookup.git
-    cd dlookup
-    ```
+Requires Go 1.24.2 or newer.
 
-2.  **Get Dependencies (if building from source):**
-    ```bash
-    go mod tidy
-    ```
+```bash
+git clone https://github.com/kristiand00/dlookup.git && cd dlookup && go build -o dlookup .
+```
 
-3.  **Build the binary (if building from source):**
-    ```bash
-    go build -o dlookup .
-    ```
-    This will create an executable file named `dlookup` in the current directory.
+## Usage
+
+```
+dlookup [options] [target ...]
+dlookup [options] --<lookup> FILE [target ...]
+dlookup -o text|json --lookup <lookup> [options] target ...
+```
+
+Files contain one target per line; blank lines and `#` comments are ignored. Use `-` as the file (or as a target) to read from stdin. Invalid targets are skipped with a warning.
+
+### Interactive
+
+```bash
+dlookup                                 # empty tab, type a domain/IP
+dlookup example.com 1.1.1.1             # a tab per target, pick the lookup in the TUI
+dlookup --dig-a domains.txt extra.com   # run DIG (A) on every target, one tab each
+dlookup --report domains.txt --server 1.1.1.1
+```
+
+### Headless
+
+```bash
+dlookup -o json --lookup dig-mx example.com
+cat domains.txt | dlookup -o text --lookup rdap -
+dlookup -o text --dig-a domains.txt --server 1.1.1.1 --timeout 5s --concurrency 4
+```
+
+Results are printed in input order. Exit code is `0` on success, `1` if any lookup failed, `2` on usage errors. JSON output is an array of `{"target", "lookup", "output", "error", "duration_ms"}`.
+
+### Options
+
+| Flag | Description |
+| --- | --- |
+| `--<lookup> FILE` | Run that lookup on targets from FILE (only one at a time) |
+| `--lookup NAME` | Select the lookup by flag name (e.g. `dig-mx`) for positional targets |
+| `-o`, `--output text\|json` | Headless mode |
+| `--server HOST[:PORT]` | DNS server to query (default: system resolver) |
+| `--timeout DURATION` | Per-lookup timeout (default `15s`) |
+| `--concurrency N` | Headless: parallel lookups (default 8) |
+| `--version` | Print version |
+
+**Lookup flags:** `--dig-a`, `--dig-aaaa`, `--dig-any`, `--dig-caa`, `--dig-cname`, `--dig-dmarc`, `--dig-mx`, `--dig-ns`, `--dig-ptr`, `--dig-soa`, `--dig-spf`, `--dig-txt`, `--nslookup`, `--rdap`, `--whois`, `--report`. Run `dlookup --help` for the full list.
+
+`DIG (ANY)` is available on its own but left out of the Report, since most resolvers refuse ANY queries (RFC 8482).
+
+## Keybindings
+
+Defaults are shown below; the help bar at the bottom always reflects your configured keys. `esc` always works as back/cancel, and printable keys are typed normally while an input is focused.
+
+| Key | Action |
+| --- | --- |
+| `ctrl+c` | Quit |
+| `n` | New tab |
+| `x` | Close tab |
+| `←` / `→` | Previous / next tab |
+| `enter` | Confirm (domain input, lookup selection, dialogs) |
+| `q` / `esc` | Back (stops watch mode; cancels a running lookup) |
+| `↑` `↓` `PgUp` `PgDn` `g` `G` | Scroll results |
+| `w` | Start watch mode (prompts for interval) / stop watching |
+| `s` | Set DNS server for this tab (empty = system default) |
+| `y` | Copy result to clipboard |
+| `ctrl+x` | Export this tab's result (filename pre-filled) |
+| `ctrl+e` | Export all tabs to `./dlookup-all-<timestamp>.txt` |
+
+Mouse capture is off, so you can select and copy text with your terminal as usual.
 
 ## Configuration
 
-The application uses a configuration file located at `~/.config/dlookup/config.yaml` . The first time you run `dlookup`, if this file doesn't exist, it will be created with default settings.
-
-You can edit this file to customize keybindings. The default configuration looks like this:
+The config lives at `~/.config/dlookup/config.yaml` on Linux and macOS (`%AppData%\dlookup\config.yaml` on Windows) and is created with defaults on first run:
 
 ```yaml
 keybindings:
-  quit: c
-  new_tab: n
-  close_tab: w
+  quit: ctrl+c
+  new_tab: "n"
+  close_tab: x
   next_tab: right
   prev_tab: left
   back: q
   confirm: enter
   watch_toggle: w
+  export: ctrl+x
+  export_all: ctrl+e
+  copy: "y"
+  server: s
 ```
 
-Refer to the Bubble Tea documentation for supported key combinations (e.g., `ctrl+a`, `alt+b`, `f1`, `space`, etc.).
+Keys missing from the file use their defaults. Empty or duplicate bindings are reported on startup, reset to defaults and the file is updated — configs from older versions (where `close_tab` and `watch_toggle` were both `w`) are fixed automatically. See the [Bubble Tea key names](https://github.com/charmbracelet/bubbletea) for supported keys (`ctrl+a`, `alt+b`, `f1`, `space`, …).
 
-## Usage
+## Development
 
-You can run the application in two main ways:
+```bash
+go vet ./...
+go test -race ./...
+```
 
-**1. Command-Line Mode (Auto-Run Lookups)**
-
-   Use flags to specify a lookup type and a file containing domains or IP addresses (one per line). The application will start, open a tab for each entry in the file, and automatically run the specified lookup.
-
-   **Format:**
-   ```bash
-   ./dlookup --<lookup-type> <filename>
-   ```
-
-   **Available `<lookup-type>` flags:**
-   * `--nslookup`
-   * `--dig-any`
-   * `--dig-a`
-   * `--dig-aaaa`
-   * `--dig-mx`
-   * `--dig-txt`
-   * `--dig-soa`
-   * `--dig-cname`
-   * `--whois`
-   * `--report`
-
-   **Examples:**
-   ```bash
-   # Run NSLOOKUP on all domains in domains.txt
-   ./dlookup --nslookup domains.txt
-
-   # Run DIG (A) lookup on hosts listed in targets.txt
-   ./dlookup --dig-a targets.txt
-
-   # Run WHOIS lookup on IPs in ip-list.txt
-   ./dlookup --whois ip-list.txt
-
-   # Run the comprehensive report on domains in list.txt
-   ./dlookup --report list.txt
-   ```
-   **Note:** Only one lookup type flag (e.g., `--nslookup`, `--dig-a`) can be used at a time.
-
-**2. Interactive Mode**
-
-   Run the application without any arguments to start the interactive TUI.
-
-   ```bash
-   ./dlookup
-   ```
-
-**3. Using `go run` (for quick testing)**
-   You can also run directly without building:
-   ```bash
-   # Interactive mode
-   go run main.go config.go
-
-   # Command-line mode
-   go run main.go config.go --nslookup domains.txt
-   ```
-
-## Keybindings (Interactive Mode)
-
-The keybindings listed below are the *defaults*. They can be changed by editing the configuration file (`~/.config/dlookup/config.yaml`). The help bar at the bottom of the TUI will always reflect the *currently configured* keybindings.
-
-* **General:**
-    * `C`: Quit (Default: `c`)
-    * `N`: New Tab (Default: `n`)
-    * `W`: Close Tab (Default: `w`)
-    * `Right`: Next Tab (Default: `right`)
-    * `Left`: Previous Tab (Default: `left`)
-* **Input Domain/IP:**
-    * Type the domain name or IP address.
-    * `Enter`: Confirm Input (Default: `enter`)
-* **Select Lookup Type:**
-    * `↑` / `↓`: Navigate the list.
-    * `Enter`: Confirm Selection (Default: `enter`)
-    * `Q`: Back (Default: `q`)
-* **View Results / Error:**
-    * `↑` / `↓` / `PageUp` / `PageDown` / `j` / `k`: Scroll through the output.
-    * `W`: Watch Mode Toggle (Default: `w`) - *Not available for Report*
-    * `Q`: Back (Default: `q`) - Stops watch mode if active.
-* **Watch Interval Input:**
-    * Type the interval in seconds.
-    * `Enter`: Confirm Interval (Default: `enter`)
-    * `Q`: Cancel Watch (Default: `q`)
+CI runs vet, tests, golangci-lint and cross-platform builds on every PR. Releases are built by GoReleaser when a `v*.*.*` tag is pushed.
 
 ## License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+MIT — see `LICENSE`.
 
 ## Acknowledgements
 
-* [Charm](https://charm.sh/) - For the excellent Bubble Tea and Lipgloss libraries that make building TUIs in Go enjoyable.
-* [go-yaml/yaml](https://github.com/go-yaml/yaml) - For the YAML parsing library.
+* [Charm](https://charm.sh/) — Bubble Tea, Bubbles and Lip Gloss.
+* [miekg/dns](https://github.com/miekg/dns) — DNS library.
+* [go-yaml/yaml](https://github.com/go-yaml/yaml) — YAML parsing.

@@ -1,2 +1,18 @@
+# Binaries
 dlookup
+*.exe
+*.test
+
+# Local data
 domains.txt
+
+# GoReleaser output
+dist/
+
+# Coverage
+*.out
+coverage.*
+*.coverprofile
+
+# OS files
+.DS_Store

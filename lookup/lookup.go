@@ -2,18 +2,45 @@ package lookup
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
+// DefaultTimeout is applied to each command run when Options.Timeout is zero.
+const DefaultTimeout = 15 * time.Second
+
+// Options configures a single lookup execution.
+type Options struct {
+	Server  string        // optional DNS server, e.g. "1.1.1.1" or "1.1.1.1:53"; "" = system default
+	Timeout time.Duration // 0 = DefaultTimeout
+}
+
+// timeout returns the effective timeout for these options.
+func (o Options) timeout() time.Duration {
+	if o.Timeout <= 0 {
+		return DefaultTimeout
+	}
+	return o.Timeout
+}
+
+// LookupProvider is implemented by every lookup type (dig, nslookup, whois, report, ...).
 type LookupProvider interface {
+	// Name is the human-readable, unique name (e.g. "DIG (A)").
 	Name() string
-	Execute(domain string) (output string, err error)
-	CheckAvailability() bool
+	// FlagName is the unique CLI flag name (e.g. "dig-dig-a").
 	FlagName() string
+	// Usage is the CLI flag usage text.
 	Usage() string
+	// Command is the external binary this provider needs, or "" if none.
+	Command() string
+	// CheckAvailability reports whether the provider can run on this system.
+	CheckAvailability() bool
+	// Execute runs the lookup against target.
+	Execute(ctx context.Context, target string, opts Options) (string, error)
 }
 
 var (
@@ -59,11 +86,19 @@ func GetProviderByFlagName(flagName string) (LookupProvider, bool) {
 			return provider, true
 		}
 	}
+	// Legacy alias: older builds generated "dig-dig-a" style flag names.
+	if legacy, ok := strings.CutPrefix(flagName, "dig-dig-"); ok {
+		for _, provider := range registry {
+			if provider.FlagName() == "dig-"+legacy {
+				return provider, true
+			}
+		}
+	}
 	return nil, false
 }
 
+// AvailableProviders returns all registered providers (in no particular order).
 func AvailableProviders() []LookupProvider {
-
 	checkAllCommandsOnce()
 
 	registryMutex.RLock()
@@ -75,25 +110,12 @@ func AvailableProviders() []LookupProvider {
 	return providers
 }
 
-func checkCommand(cmdName string) bool {
-	cmdCheckMutex.Lock()
-	defer cmdCheckMutex.Unlock()
-
-	if available, checked := commandsAvailable[cmdName]; checked {
-		return available
-	}
-
-	_, err := exec.LookPath(cmdName)
-	available := (err == nil)
-	commandsAvailable[cmdName] = available
-	return available
-}
-
 // LookupCheckCommandFunc is a function variable that wraps the command checking logic.
 // Tests can replace this with a mock implementation.
 var LookupCheckCommandFunc = internalCheckCommand
 
 // internalCheckCommand is the actual implementation for checking command availability.
+// Results are cached per command name.
 func internalCheckCommand(cmdName string) bool {
 	cmdCheckMutex.Lock()
 	defer cmdCheckMutex.Unlock()
@@ -103,24 +125,18 @@ func internalCheckCommand(cmdName string) bool {
 	}
 
 	_, err := exec.LookPath(cmdName)
-	available := (err == nil)
+	available := err == nil
 	commandsAvailable[cmdName] = available
 	return available
 }
-
 
 func checkAllCommandsOnce() {
 	initialCmdCheck.Do(func() {
 		requiredCmds := make(map[string]struct{})
 		registryMutex.RLock()
 		for _, p := range registry {
-			switch {
-			case strings.HasPrefix(p.Name(), "DIG"):
-				requiredCmds["dig"] = struct{}{}
-			case strings.HasPrefix(p.Name(), "NSLOOKUP"):
-				requiredCmds["nslookup"] = struct{}{}
-			case strings.HasPrefix(p.Name(), "WHOIS"):
-				requiredCmds["whois"] = struct{}{}
+			if c := p.Command(); c != "" {
+				requiredCmds[c] = struct{}{}
 			}
 		}
 		registryMutex.RUnlock()
@@ -131,49 +147,46 @@ func checkAllCommandsOnce() {
 }
 
 // osRunCommandInternal is the actual implementation that executes a command.
-// It returns the raw output (potentially combined stdout/stderr) and raw error.
-func osRunCommandInternal(cmdName string, args ...string) (string, error) {
-	cmd := exec.Command(cmdName, args...)
+// It returns the raw output (combined stdout/stderr) and raw error.
+func osRunCommandInternal(ctx context.Context, cmdName string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, cmdName, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run() // This is the raw error from the command execution
+	err := cmd.Run()
 
 	output := strings.TrimSpace(stdout.String())
 	errMsg := strings.TrimSpace(stderr.String())
 
-	// Combine stdout and stderr into a single output string for simplicity if needed by caller
-	// Or, could return them separately if RunCommand is made to handle it.
-	// For now, stick to current combined behavior if errMsg is present.
 	finalOutput := output
 	if errMsg != "" {
 		if output != "" {
-			finalOutput = fmt.Sprintf("STDOUT:\n%s\nSTDERR:\n%s", output, errMsg) // Adjusted format slightly for clarity
+			finalOutput = fmt.Sprintf("STDOUT:\n%s\nSTDERR:\n%s", output, errMsg)
 		} else {
 			finalOutput = fmt.Sprintf("STDERR:\n%s", errMsg)
 		}
 	}
-	return finalOutput, err // Return raw output and raw error
+	return finalOutput, err
 }
 
 // OsRunCommand is a variable that holds the function to execute commands.
-// Tests can replace this with a mock implementation. It should adhere to returning raw output and raw error.
+// Tests can replace this with a mock implementation. It should return raw output and raw error.
 var OsRunCommand = osRunCommandInternal
 
-// RunCommand executes a command using the function assigned to OsRunCommand,
+// RunCommand executes a command via OsRunCommand with opts' timeout applied to ctx,
 // then applies transformations (error wrapping, "No results found").
-func RunCommand(cmdName string, args ...string) (string, error) {
-	rawOutput, rawErr := OsRunCommand(cmdName, args...)
+func RunCommand(ctx context.Context, opts Options, cmdName string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, opts.timeout())
+	defer cancel()
+
+	rawOutput, rawErr := OsRunCommand(ctx, cmdName, args...)
 
 	if rawErr != nil {
-		// Error wrapping logic, potentially including rawOutput if it's stderr
-		// Based on previous osRunCommandInternal, rawOutput might already contain stderr.
-		// Let's assume rawOutput is the string to return alongside the error.
-		detail := fmt.Errorf("command '%s %s' failed: %w", cmdName, strings.Join(args, " "), rawErr)
-		// If rawOutput contains actual stderr info (as per osRunCommandInternal's old logic),
-		// it might need to be appended to 'detail' or handled.
-		// For now, the tests set rawOutput to "error output" in failure cases.
-		return rawOutput, detail
+		// Prefer the context error (deadline/cancel) over e.g. "signal: killed".
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			rawErr = ctxErr
+		}
+		return rawOutput, fmt.Errorf("command '%s %s' failed: %w", cmdName, strings.Join(args, " "), rawErr)
 	}
 
 	if rawOutput == "" {
