@@ -16,6 +16,7 @@ var (
 	colorGreen      = lipgloss.Color("78")
 	colorHelpKey    = lipgloss.Color("81")
 	colorHelpDesc   = lipgloss.Color("241")
+	colorCyan       = lipgloss.Color("45")
 
 	tabStyle = lipgloss.NewStyle().
 			Foreground(colorLightGrey).
@@ -65,6 +66,17 @@ var (
 	statusStyle     = lipgloss.NewStyle().Foreground(colorGreen).Padding(0, 1)
 	validationStyle = lipgloss.NewStyle().Foreground(colorRed).Padding(0, 1)
 	changedStyle    = lipgloss.NewStyle().Foreground(colorOrange).Bold(true)
+
+	// Zone diff.
+	zdMatchStyle   = lipgloss.NewStyle().Foreground(colorGreen)
+	zdChangedStyle = lipgloss.NewStyle().Foreground(colorOrange)
+	zdMissingStyle = lipgloss.NewStyle().Foreground(colorRed)
+	zdExtraStyle   = lipgloss.NewStyle().Foreground(colorCyan)
+	zdErrorStyle   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+	zdNoteStyle    = lipgloss.NewStyle().Foreground(colorGrey).Faint(true)
+	zdLabelStyle   = lipgloss.NewStyle().Foreground(colorLightGrey)
+	zdBannerStyle  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).
+			Border(lipgloss.RoundedBorder()).BorderForeground(colorGreen).Padding(0, 1)
 )
 
 // truncateWidth shortens s to at most width terminal cells (grapheme and

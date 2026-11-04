@@ -262,6 +262,7 @@ Usage:
   dlookup [options] [target ...]
   dlookup [options] --<lookup> FILE [target ...]
   dlookup -o text|json --lookup <lookup> [options] target ...
+  dlookup zonediff <domain> --new <server> [options]   (see 'dlookup zonediff --help')
 
 Without --output, dlookup starts the interactive TUI with one tab per target.
 With --output, it runs the lookup on every target, prints the results in
@@ -294,6 +295,7 @@ Examples:
   dlookup -o json --lookup dig-mx example.com
   cat domains.txt | dlookup -o text --lookup whois -
   dlookup -o text --dig-a domains.txt --server 1.1.1.1 --timeout 5s --concurrency 4
+  dlookup zonediff example.com --new ns1.newprovider.net   compare records before an NS switch
 `)
 }
 

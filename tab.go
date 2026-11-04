@@ -92,11 +92,12 @@ const (
 	stateWatchIntervalInput
 	stateExportFilenameInput
 	stateServerInput
+	stateZoneDiffForm
 )
 
 // isModal reports whether s is a modal overlay that returns to lastState.
 func (s tabState) isModal() bool {
-	return s == stateWatchIntervalInput || s == stateExportFilenameInput || s == stateServerInput
+	return s == stateWatchIntervalInput || s == stateExportFilenameInput || s == stateServerInput || s == stateZoneDiffForm
 }
 
 type lookupItem string
@@ -171,6 +172,9 @@ type tabModel struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	lookupOpts lookup.Options
+
+	// Zone diff screen (see zonediff_tui.go).
+	zd zoneDiffState
 }
 
 // newTabModel creates a tab. If both initialDomain and initialLookupType are set
@@ -189,10 +193,11 @@ func newTabModel(width, height int, initialDomain, initialLookupType string, opt
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].Name() < providers[j].Name()
 	})
-	items := make([]list.Item, len(providers))
-	for i, p := range providers {
-		items[i] = lookupItem(p.Name())
+	items := make([]list.Item, 0, len(providers)+1)
+	for _, p := range providers {
+		items = append(items, lookupItem(p.Name()))
 	}
+	items = append(items, lookupItem(zoneDiffName))
 
 	lookupList := list.New(items, itemDelegate{}, width-4, 10)
 	lookupList.Title = "Select Lookup Type:"
@@ -232,6 +237,7 @@ func newTabModel(width, height int, initialDomain, initialLookupType string, opt
 		ctx:           ctx,
 		cancel:        cancel,
 		lookupOpts:    opts,
+		zd:            zoneDiffState{form: newZoneDiffForm()},
 	}
 	nextTabID++
 	m.textInput.SetValue(initialDomain)
@@ -313,7 +319,7 @@ func (m tabModel) Init() tea.Cmd {
 // typed into a text input (so printable global keys must not be intercepted).
 func (m tabModel) textEntryActive() bool {
 	switch m.state {
-	case stateInputDomain, stateWatchIntervalInput, stateExportFilenameInput, stateServerInput:
+	case stateInputDomain, stateWatchIntervalInput, stateExportFilenameInput, stateServerInput, stateZoneDiffForm:
 		return true
 	}
 	return false
@@ -321,7 +327,7 @@ func (m tabModel) textEntryActive() bool {
 
 // watchAvailable reports whether watch mode applies to the tab's lookup.
 func (m tabModel) watchAvailable() bool {
-	return m.lookupType != "" && m.lookupType != lookup.ComprehensiveReportName
+	return m.lookupType != "" && m.lookupType != lookup.ComprehensiveReportName && !m.isZoneDiff()
 }
 
 // resultsVisible reports whether results or an error are shown.
@@ -375,6 +381,7 @@ func (m *tabModel) closeModal() {
 	m.intervalInput.Blur()
 	m.exportInput.Blur()
 	m.serverInput.Blur()
+	m.zd.form.blur()
 	m.inputErr = ""
 	m.state = m.lastState
 	m.setSize(m.width, m.height)
@@ -432,6 +439,10 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 			m.viewport, cmd = m.viewport.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+	}
+
+	if cmd, ok := m.handleZoneDiffMsg(msg); ok {
+		return m, tea.Batch(append(cmds, cmd)...)
 	}
 
 	switch msg := msg.(type) {
@@ -512,6 +523,10 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 			m.exportInput, cmd = m.exportInput.Update(msg)
 		case stateServerInput:
 			m.serverInput, cmd = m.serverInput.Update(msg)
+		case stateZoneDiffForm:
+			if in := m.zd.form.input(m.zd.form.focus); in != nil {
+				*in, cmd = in.Update(msg)
+			}
 		}
 		cmds = append(cmds, cmd)
 	}
@@ -522,8 +537,10 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 // results view (so it is not also forwarded to the viewport).
 func (m tabModel) isTabKey(km tea.KeyMsg, k Keybindings) bool {
 	switch km.String() {
-	case k.Back, k.WatchToggle, k.Export, k.Copy, k.Server:
+	case k.Back, k.WatchToggle, k.Export, k.Copy, k.Server, k.ZoneDiff:
 		return true
+	case k.ToggleMatches:
+		return m.isZoneDiff()
 	}
 	return false
 }
@@ -532,9 +549,19 @@ func (m *tabModel) handleKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
 	key := msg.String()
 	switch m.state {
 	case stateViewResults, stateError:
+		if m.isZoneDiff() {
+			if isBackKey(msg, k, false) {
+				return m.goToSelect()
+			}
+			if cmd, ok := m.handleZoneDiffResultKey(msg, k); ok {
+				return cmd
+			}
+		}
 		switch {
 		case isBackKey(msg, k, false):
 			return m.goToInput()
+		case key == k.ZoneDiff:
+			return m.openZoneDiffForm()
 		case key == k.WatchToggle:
 			if !m.watchAvailable() {
 				return nil
@@ -561,6 +588,9 @@ func (m *tabModel) handleKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
 				return tabStatusMsg{tabId: id, text: "Copied result to clipboard"}
 			}
 		case key == k.Server:
+			if m.isZoneDiff() {
+				return nil // the zone diff form has its own servers
+			}
 			return m.openModal(stateServerInput, &m.serverInput, m.lookupOpts.Server)
 		case key == "home" || key == "g":
 			m.viewport.GotoTop()
@@ -600,10 +630,15 @@ func (m *tabModel) handleKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
 			return m.goToInput()
 		case key == k.Server:
 			return m.openModal(stateServerInput, &m.serverInput, m.lookupOpts.Server)
+		case key == k.ZoneDiff:
+			return m.openZoneDiffForm()
 		case key == k.Confirm:
 			selected := m.lookupList.SelectedItem()
 			if selected == nil {
 				return nil
+			}
+			if selected.(lookupItem).FilterValue() == zoneDiffName {
+				return m.openZoneDiffForm()
 			}
 			m.stopWatch()
 			m.lookupType = selected.(lookupItem).FilterValue()
@@ -703,8 +738,14 @@ func (m *tabModel) handleKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
 		m.inputErr = ""
 		return cmd
 
+	case stateZoneDiffForm:
+		return m.handleZoneDiffFormKey(msg, k)
+
 	case stateLoading:
 		if isBackKey(msg, k, false) {
+			if m.isZoneDiff() {
+				return m.goToSelect()
+			}
 			return m.goToInput()
 		}
 	}
@@ -735,6 +776,10 @@ func (m *tabModel) renderContent() {
 	var b strings.Builder
 	switch m.baseState() {
 	case stateViewResults:
+		if m.isZoneDiff() {
+			m.viewport.SetContent(m.renderZoneDiff())
+			return
+		}
 		b.WriteString(resultHeaderStyle.Render(fmt.Sprintf("%s Results for %s%s", m.lookupType, m.domain, m.watchLabel())))
 		b.WriteString("\n")
 		if m.isWatching && !m.lastUpdated.IsZero() {
@@ -780,6 +825,9 @@ func (m *tabModel) renderContent() {
 func (m tabModel) plainContent() string {
 	switch m.baseState() {
 	case stateViewResults:
+		if m.isZoneDiff() {
+			return m.zoneDiffPlain()
+		}
 		return m.result
 	case stateError:
 		return fmt.Sprintf("Error running %s for %s%s\nError:\n%v", m.lookupType, m.domain, m.watchLabel(), m.err)
@@ -800,7 +848,7 @@ func (m tabModel) View() string {
 		if m.inputErr != "" {
 			b.WriteString(validationStyle.Render(m.inputErr))
 		}
-	case stateWatchIntervalInput, stateExportFilenameInput, stateServerInput:
+	case stateWatchIntervalInput, stateExportFilenameInput, stateServerInput, stateZoneDiffForm:
 		b.WriteString("\n")
 	default:
 		b.WriteString(m.compactHeader())
@@ -825,6 +873,8 @@ func (m tabModel) View() string {
 		b.WriteString(m.modal(50, colorLightBlue, "DNS server for this tab (empty = system default):", m.serverInput.View(), "(Enter to set, Esc to cancel)"))
 	case stateExportFilenameInput:
 		b.WriteString(m.modal(max(60, m.width/2), colorGreen, "Enter filename/path to export results:", m.exportInput.View(), "(Enter to save, Esc to cancel)"))
+	case stateZoneDiffForm:
+		b.WriteString(m.zoneDiffFormView())
 	}
 	return b.String()
 }
@@ -842,11 +892,14 @@ func (m tabModel) compactHeader() string {
 		if m.state == stateLoading {
 			lookupStr = fmt.Sprintf(" | Running %s...", m.lookupType)
 		}
+		if m.isZoneDiff() && m.zd.opts.NewServer != "" {
+			lookupStr += " ⇄ " + m.zd.opts.NewServer
+		}
 		if lipgloss.Width(header+lookupStr+watchStatus) < m.width-2 {
 			header += lookupStr
 		}
 	}
-	if m.lookupOpts.Server != "" {
+	if m.lookupOpts.Server != "" && !m.isZoneDiff() {
 		serverStr := " | Server: " + m.lookupOpts.Server
 		if lipgloss.Width(header+serverStr+watchStatus) < m.width-2 {
 			header += serverStr
@@ -875,6 +928,9 @@ func (m tabModel) modal(width int, border lipgloss.Color, prompt, input, hint st
 // startLookup starts a new lookup run for the tab's domain and lookup type,
 // superseding any in-flight run.
 func (m *tabModel) startLookup() tea.Cmd {
+	if m.isZoneDiff() {
+		return m.startZoneDiff()
+	}
 	if m.lookupCancel != nil {
 		m.lookupCancel()
 	}

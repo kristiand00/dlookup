@@ -36,7 +36,11 @@ func main() {
 
 // run executes dlookup and returns the process exit code:
 // 0 success, 1 a lookup (or the TUI) failed, 2 usage error.
+// "dlookup zonediff ..." has its own exit codes (see runZoneDiff).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "zonediff" {
+		return runZoneDiff(args[1:], stdin, stdout, stderr)
+	}
 	cli, err := parseArgs(args, stdin, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {

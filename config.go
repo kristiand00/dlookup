@@ -28,6 +28,9 @@ type Keybindings struct {
 	ExportAll   string `yaml:"export_all"`   // Export all tabs' results into one file
 	Copy        string `yaml:"copy"`         // Copy the current result to the clipboard
 	Server      string `yaml:"server"`       // Set the DNS server for the current tab
+	ZoneDiff    string `yaml:"zone_diff"`    // Open the zone diff form for the current domain
+	// ToggleMatches shows/hides matching records in the zone diff view.
+	ToggleMatches string `yaml:"toggle_matches"`
 }
 
 // keybindingField is a named, addressable keybinding used for validation.
@@ -51,6 +54,8 @@ func (k *Keybindings) fields() []keybindingField {
 		{"export_all", &k.ExportAll},
 		{"copy", &k.Copy},
 		{"server", &k.Server},
+		{"zone_diff", &k.ZoneDiff},
+		{"toggle_matches", &k.ToggleMatches},
 	}
 }
 
@@ -63,18 +68,20 @@ type AppConfig struct {
 // DefaultKeybindings provides the default key mapping. All values are distinct.
 func DefaultKeybindings() Keybindings {
 	return Keybindings{
-		Quit:        "ctrl+c",
-		NewTab:      "n",
-		CloseTab:    "x",
-		NextTab:     "right",
-		PrevTab:     "left",
-		Back:        "q",
-		Confirm:     "enter",
-		WatchToggle: "w",
-		Export:      "ctrl+x",
-		ExportAll:   "ctrl+e",
-		Copy:        "y",
-		Server:      "s",
+		Quit:          "ctrl+c",
+		NewTab:        "n",
+		CloseTab:      "x",
+		NextTab:       "right",
+		PrevTab:       "left",
+		Back:          "q",
+		Confirm:       "enter",
+		WatchToggle:   "w",
+		Export:        "ctrl+x",
+		ExportAll:     "ctrl+e",
+		Copy:          "y",
+		Server:        "s",
+		ZoneDiff:      "D",
+		ToggleMatches: "a",
 	}
 }
 

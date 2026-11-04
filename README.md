@@ -13,6 +13,7 @@ A terminal application built with Go and Bubble Tea for DNS lookups, RDAP/WHOIS 
 * **Comprehensive Report** — runs every lookup for a target and combines the results.
 * **Watch mode** — re-run a lookup on an interval; new lines are highlighted (`+`), removed ones listed (`-`), and background tabs that changed get a `●` marker.
 * **Custom DNS server** — per tab in the TUI (`s`) or with `--server`.
+* **Zone diff** — compare a domain's records on its current nameservers against a new DNS server before migrating (`dlookup zonediff` or `D` in the TUI).
 * **Headless mode** — `-o text|json` prints results and exits, for scripting and pipelines.
 * **Export & copy** — save one tab or all tabs to a file, or copy the result to the clipboard.
 * **Configurable keybindings** via YAML, with conflict detection.
@@ -88,6 +89,34 @@ Results are printed in input order. Exit code is `0` on success, `1` if any look
 
 `DIG (ANY)` is available on its own but left out of the Report, since most resolvers refuse ANY queries (RFC 8482).
 
+### Zone diff (DNS migrations)
+
+Check that a new DNS provider serves the same records as the current one before you switch nameservers:
+
+```bash
+dlookup zonediff example.com --new ns1.newprovider.com
+dlookup zonediff example.com --new 203.0.113.53 --old ns1.oldprovider.com --names shop,vpn -o json
+```
+
+The old side defaults to the domain's current authoritative nameservers. dlookup tries a zone transfer (AXFR) first. Most servers refuse it, so it then checks the apex, common names (www, mail, autodiscover, `_dmarc`, DKIM selectors, SRV records, a wildcard probe, …), any in-zone names those records point to, and names you add with `--names` / `--names-file`.
+
+TTLs and the SOA serial are ignored unless you pass `--ttl`. Changes that are normal when switching provider (apex NS, SOA primary NS/contact) are shown as `[expected]` and don't count as differences.
+
+| Flag | Description |
+| --- | --- |
+| `--new SERVER` | New DNS server, IP or hostname (required) |
+| `--old SERVER` | Old server (default: authoritative NS) |
+| `--names a,b` / `--names-file FILE` | Extra names to check |
+| `--types A,MX,…` | Record types (default A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, SRV) |
+| `--ttl` | Also compare TTLs |
+| `--no-axfr` | Don't attempt a zone transfer |
+| `--all` | Also list matching records |
+| `-o text\|json` | Output format |
+
+Exit codes: `0` no differences, `1` differences found, `2` usage error, `3` a server couldn't be queried.
+
+In the TUI, pick **Zone Diff** from the lookup list or press `D`. Fill in the new server (and optionally the old server and extra names) and press enter. In the results, `a` shows or hides matching records, `1`–`5` filter by status (`0` clears), `r` re-runs, and export/copy work as usual.
+
 ## Keybindings
 
 Defaults are shown below; the help bar at the bottom always reflects your configured keys. `esc` always works as back/cancel, and printable keys are typed normally while an input is focused.
@@ -106,6 +135,8 @@ Defaults are shown below; the help bar at the bottom always reflects your config
 | `y` | Copy result to clipboard |
 | `ctrl+x` | Export this tab's result (filename pre-filled) |
 | `ctrl+e` | Export all tabs to `./dlookup-all-<timestamp>.txt` |
+| `D` | Zone diff for this domain against a new DNS server |
+| `a` | Zone diff: show/hide matching records |
 
 Mouse capture is off, so you can select and copy text with your terminal as usual.
 
@@ -127,6 +158,8 @@ keybindings:
   export_all: ctrl+e
   copy: "y"
   server: s
+  zone_diff: D
+  toggle_matches: a
 ```
 
 Keys missing from the file use their defaults. Empty or duplicate bindings are reported on startup, reset to defaults and the file is updated — configs from older versions (where `close_tab` and `watch_toggle` were both `w`) are fixed automatically. See the [Bubble Tea key names](https://github.com/charmbracelet/bubbletea) for supported keys (`ctrl+a`, `alt+b`, `f1`, `space`, …).

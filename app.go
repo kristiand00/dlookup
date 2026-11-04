@@ -94,7 +94,8 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key == k.Quit && !(textEntry && msg.Type == tea.KeyRunes) {
 			return m, tea.Quit
 		}
-		if textEntry && !globalKeyUsableInTextEntry(msg) {
+		formNav := textEntry && m.tabs[m.activeTab].state == stateZoneDiffForm && (key == "tab" || key == "shift+tab")
+		if textEntry && (formNav || !globalKeyUsableInTextEntry(msg)) {
 			// Printable and cursor-editing keys go to the focused input.
 			if m.hasActive() {
 				cmds = append(cmds, m.updateTab(m.activeTab, msg))
@@ -181,7 +182,11 @@ func (m mainModel) exportAllContent() string {
 		if t.lookupType != "" {
 			title += " — " + t.lookupType
 		}
-		if t.lookupOpts.Server != "" {
+		if t.isZoneDiff() {
+			if t.zd.opts.NewServer != "" {
+				title += " ⇄ " + t.zd.opts.NewServer
+			}
+		} else if t.lookupOpts.Server != "" {
 			title += " @" + t.lookupOpts.Server
 		}
 		fmt.Fprintf(&b, "===== %s =====\n", title)
@@ -228,8 +233,12 @@ func (m mainModel) View() string {
 		if dispValue != "" {
 			tabName = dispValue
 		}
+		suffix := ""
+		if t.isZoneDiff() && t.domain != "" {
+			suffix = " ⇄"
+		}
 		// Padding takes 2 cells of maxTabNameWidth.
-		tabName = prefix + truncateWidth(tabName, maxTabNameWidth-2-lipgloss.Width(prefix))
+		tabName = prefix + truncateWidth(tabName, maxTabNameWidth-2-lipgloss.Width(prefix)-lipgloss.Width(suffix)) + suffix
 
 		style := tabStyle
 		if i == m.activeTab {
@@ -279,10 +288,22 @@ func (m mainModel) helpView() string {
 		case stateInputDomain:
 			parts = append(parts, hint(k.Confirm, "Lookup"))
 		case stateSelectLookup:
-			parts = append(parts, hint("↑/↓/"+k.Confirm, "Select"), hint(k.Back, "Back"), hint(k.Server, "Server"))
+			parts = append(parts, hint("↑/↓/"+k.Confirm, "Select"), hint(k.Back, "Back"), hint(k.Server, "Server"), hint(k.ZoneDiff, "Zone diff"))
 		case stateLoading:
 			parts = append(parts, hint(k.Back, "Cancel"))
+		case stateZoneDiffForm:
+			parts = append(parts, hint("tab/shift+tab", "Field"), hint("space", "Toggle"), hint(k.Confirm, "Run"), hint("esc", "Cancel"))
 		case stateViewResults, stateError:
+			if t.isZoneDiff() {
+				parts = append(parts, hint(k.Back, "Back"), hint(k.Confirm+"/r", "Re-run"))
+				if t.zd.showMatches {
+					parts = append(parts, hint(k.ToggleMatches, "Hide matches"))
+				} else {
+					parts = append(parts, hint(k.ToggleMatches, "Show matches"))
+				}
+				parts = append(parts, hint("1-5/0", "Filter"), hint(k.Export, "Export"), hint(k.Copy, "Copy"))
+				break
+			}
 			parts = append(parts, hint("↑/↓/pgup/pgdn", "Scroll"), hint(k.Back, "Back"))
 			if t.watchAvailable() {
 				if t.isWatching {
@@ -291,7 +312,7 @@ func (m mainModel) helpView() string {
 					parts = append(parts, hint(k.WatchToggle, "Watch"))
 				}
 			}
-			parts = append(parts, hint(k.Export, "Export"), hint(k.Copy, "Copy"), hint(k.Server, "Server"))
+			parts = append(parts, hint(k.Export, "Export"), hint(k.Copy, "Copy"), hint(k.Server, "Server"), hint(k.ZoneDiff, "Zone diff"))
 		case stateWatchIntervalInput, stateExportFilenameInput, stateServerInput:
 			parts = append(parts, hint(k.Confirm, "Confirm"), hint("esc", "Cancel"))
 		}
