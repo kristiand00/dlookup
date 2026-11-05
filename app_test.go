@@ -515,3 +515,16 @@ func TestTruncateUnicode(t *testing.T) {
 		}
 	}
 }
+
+func TestCtrlCAlwaysQuits(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Keybindings.Quit = "c"
+	m := newMainModel(nil, "", cfg, lookup.Options{})
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c returned no command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("ctrl+c did not quit when quit is rebound to c")
+	}
+}

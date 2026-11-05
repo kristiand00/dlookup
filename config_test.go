@@ -74,3 +74,18 @@ func TestOldConfigGetsNewKeyDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNormalizeKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"ctrl + q":  "ctrl+q",
+		" ctrl+x ":  "ctrl+x",
+		"alt +  b":  "alt+b",
+		"q":         "q",
+		"+":         "+",
+		"shift+tab": "shift+tab",
+	} {
+		if got := normalizeKey(in); got != want {
+			t.Errorf("normalizeKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

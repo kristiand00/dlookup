@@ -90,8 +90,9 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		key := msg.String()
 		textEntry := m.hasActive() && m.tabs[m.activeTab].textEntryActive()
 
-		// Quit always works unless it is a printable key being typed.
-		if key == k.Quit && !(textEntry && msg.Type == tea.KeyRunes) {
+		// ctrl+c always quits, whatever the config says; the configured quit key
+		// also works unless it is a printable key being typed.
+		if key == "ctrl+c" || (key == k.Quit && !(textEntry && msg.Type == tea.KeyRunes)) {
 			return m, tea.Quit
 		}
 		formNav := textEntry && m.tabs[m.activeTab].state == stateZoneDiffForm && (key == "tab" || key == "shift+tab")

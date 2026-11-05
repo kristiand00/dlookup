@@ -129,9 +129,23 @@ func keybindingProblems(k *Keybindings) (map[string]bool, error) {
 // binding that differs from its default is reset to the default; if that still
 // leaves conflicts, all defaults are used. It returns the usable bindings and the
 // original validation error (nil when k was valid).
+// normalizeKey trims a key name and removes spaces around "+", so that
+// "ctrl + q" matches Bubble Tea's "ctrl+q".
+func normalizeKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "+" || !strings.Contains(key, "+") {
+		return key
+	}
+	parts := strings.Split(key, "+")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return strings.Join(parts, "+")
+}
+
 func sanitizeKeybindings(k Keybindings) (Keybindings, error) {
 	for _, f := range k.fields() {
-		*f.val = strings.TrimSpace(*f.val)
+		*f.val = normalizeKey(*f.val)
 	}
 	bad, err := keybindingProblems(&k)
 	if err == nil {
