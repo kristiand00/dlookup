@@ -6,13 +6,13 @@ A terminal application built with Go and Bubble Tea for DNS lookups, RDAP/WHOIS 
 
 ## Features
 
-* **Interactive TUI** with tabs — one per domain/IP, all lookups run in parallel (at most 8 at once).
+* **Midnight Commander-style TUI** — menu bar, clickable tabs, dialogs with dropdowns, an F-key bar and full mouse support. It opens on a Home screen listing every feature and shortcut. Every lookup gets its own tab, and lookups run in parallel (at most 8 at once).
 * **Native DNS** — A, AAAA, CNAME, MX, NS, SOA, TXT, CAA, PTR, SPF, DMARC and ANY are resolved in Go (no `dig` needed). PTR on an IP does a reverse lookup.
 * **RDAP** — structured registration data over HTTPS (registrar, status, dates, nameservers; network/range/country for IPs).
 * **NSLOOKUP / WHOIS** via the system tools, if installed.
 * **Comprehensive Report** — runs every lookup for a target and combines the results.
 * **Watch mode** — re-run a lookup on an interval; new lines are highlighted (`+`), removed ones listed (`-`), and background tabs that changed get a `●` marker.
-* **Custom DNS server** — per tab in the TUI (`s`) or with `--server`.
+* **Custom DNS server** — per tab in the TUI (`s` / F7) or with `--server`.
 * **Zone diff** — compare a domain's records on its current nameservers against a new DNS server before migrating (`dlookup zonediff` or `D` in the TUI).
 * **Headless mode** — `-o text|json` prints results and exits, for scripting and pipelines.
 * **Export & copy** — save one tab or all tabs to a file, or copy the result to the clipboard.
@@ -57,8 +57,8 @@ Files contain one target per line; blank lines and `#` comments are ignored. Use
 ### Interactive
 
 ```bash
-dlookup                                 # empty tab, type a domain/IP
-dlookup example.com 1.1.1.1             # a tab per target, pick the lookup in the TUI
+dlookup                                 # Home screen with help; press n (F2) for a lookup
+dlookup example.com 1.1.1.1             # a tab per target; the lookup dialog opens for the first
 dlookup --dig-a domains.txt extra.com   # run DIG (A) on every target, one tab each
 dlookup --report domains.txt --server 1.1.1.1
 ```
@@ -115,36 +115,63 @@ TTLs and the SOA serial are ignored unless you pass `--ttl`. Changes that are no
 
 Exit codes: `0` no differences, `1` differences found, `2` usage error, `3` a server couldn't be queried.
 
-In the TUI, pick **Zone Diff** from the lookup list or press `D`. Fill in the new server (and optionally the old server and extra names) and press enter. In the results, `a` shows or hides matching records, `1`–`5` filter by status (`0` clears), `r` re-runs, and export/copy work as usual.
+In the TUI, press `D` / F4, or pick **Zone Diff** in the New lookup dialog's lookup dropdown. Fill in the new server (and optionally the old server, extra names and the TTL/AXFR checkboxes) and press Enter. In the results, `a` shows or hides matching records, and `1`–`5` filter by status (`0` clears). Both are also in the **View** menu. `r` / F5 re-runs, Enter / F3 edits the options, and export/copy work as usual.
 
-## Keybindings
+## Using the TUI
 
-Defaults are shown below; the help bar at the bottom always reflects your configured keys. `esc` always works as back/cancel, and printable keys are typed normally while an input is focused.
+The screen is laid out like Midnight Commander:
 
-| Key | Action |
-| --- | --- |
-| `ctrl+c` | Quit |
-| `n` | New tab |
-| `x` | Close tab |
-| `←` / `→` | Previous / next tab |
-| `enter` | Confirm (domain input, lookup selection, dialogs) |
-| `q` / `esc` | Back (stops watch mode; cancels a running lookup) |
-| `↑` `↓` `PgUp` `PgDn` `g` `G` | Scroll results |
-| `w` | Start watch mode (prompts for interval) / stop watching |
-| `s` | Set DNS server for this tab (empty = system default) |
-| `y` | Copy result to clipboard |
-| `ctrl+x` | Export this tab's result (filename pre-filled) |
-| `ctrl+e` | Export all tabs to `./dlookup-all-<timestamp>.txt` |
-| `D` | Zone diff for this domain against a new DNS server |
-| `a` | Zone diff: show/hide matching records |
+```
+  Lookup   Tab   View   Options   Help          ← menu bar (F9, or alt+L/T/V/O/H)
+ Home ×  example.com ×  [+]                     ← tabs: click to switch, × closes, [+] new lookup
+┌─ example.com · DIG (MX) · @1.1.1.1 ─────────┐ ← the active tab: domain · lookup · server · [watching]
+│ …results…                                   ▲
+└─────────────────────────────────────────────┘
+ Enter change · r re-run · w watch · …          ← status / context hints
+1Help 2New 3Lookup 4ZoneDiff 5Re-run 6Watch 7Server 8Close 9Menu 10Quit
+```
 
-Mouse capture is off, so you can select and copy text with your terminal as usual.
+dlookup starts on the **Home** screen, which lists the features and a shortcut table built from *your* configured keys. No input is focused, so you can start straight away: press `n` / F2 (or click **[ New lookup ]**) to open the **New lookup** dialog. Enter a domain or IP, pick the lookup from the dropdown, optionally set a DNS server, then choose **Run**. The lookup opens in a new tab. F1 or `?` returns to Home at any time.
+
+All other input happens in dialogs: change lookup, zone diff, watch interval (presets or custom), export filename, DNS server, and confirmations when you quit or close a tab while lookups are running or being watched. In a dialog, Tab/Shift+Tab moves between fields and Space toggles a checkbox or opens a dropdown (type to filter it). Enter runs the dialog and Esc cancels it.
+
+### Keybindings
+
+F-keys are fixed; the letter keys are configurable (defaults shown). On a Mac laptop the F-keys need `fn`, so every F-key action also has a letter key. The Home screen and the menus always show your configured keys.
+
+| Key | F-key | Action |
+| --- | --- | --- |
+| `?` | F1 | Help & shortcuts (Home) |
+| `n` | F2 | New lookup (opens a new tab) |
+| `enter` | F3 | Change the lookup of this tab (zone diff: edit its options) |
+| `D` | F4 | Zone diff |
+| `r` | F5 | Re-run |
+| `w` | F6 | Watch (asks for the interval) / stop watching |
+| `s` | F7 | DNS server for this tab (empty = system default) |
+| `x` | F8 | Close tab (asks if it is being watched) |
+| alt+letter | F9 | Open a menu |
+| `ctrl+c` | F10 | Quit (F10 asks first if lookups are running or watched; `ctrl+c` always quits at once) |
+| `←` / `→` | | Previous / next tab |
+| `q` / `esc` | | Cancel a running lookup / stop watching |
+| `↑` `↓` `PgUp` `PgDn` `g` `G` | | Scroll results |
+| `y` | | Copy result to clipboard |
+| `ctrl+x` | | Export this tab's result (filename pre-filled) |
+| `ctrl+e` | | Export all tabs to `./dlookup-all-<timestamp>.txt` |
+| `a` | | Zone diff: show/hide matching records |
+| `1`–`5`, `0` | | Zone diff: filter by status / clear |
+
+### Mouse
+
+The mouse is on by default. You can click menus and their items, tabs, `×` and `[+]`, the F-key bar, the Home buttons, and dialog fields, dropdowns and buttons. The wheel scrolls results, Home and dropdown lists, and switches tabs when used over the tab bar.
+
+While the mouse is on, the terminal doesn't select text by itself. Hold **Shift** (**Option** in macOS Terminal/iTerm2) while dragging to select. You can also turn the mouse off at runtime with **Options → Mouse**, or start with it off by setting `mouse: false` in the config. Copying with `y` works either way.
 
 ## Configuration
 
 The config lives at `~/.config/dlookup/config.yaml` on Linux and macOS (`%AppData%\dlookup\config.yaml` on Windows) and is created with defaults on first run:
 
 ```yaml
+mouse: true          # mouse support (toggle at runtime in Options → Mouse)
 keybindings:
   quit: ctrl+c
   new_tab: "n"
@@ -162,7 +189,7 @@ keybindings:
   toggle_matches: a
 ```
 
-Keys missing from the file use their defaults. Empty or duplicate bindings are reported on startup, reset to defaults and the file is updated — configs from older versions (where `close_tab` and `watch_toggle` were both `w`) are fixed automatically. See the [Bubble Tea key names](https://github.com/charmbracelet/bubbletea) for supported keys (`ctrl+a`, `alt+b`, `f1`, `space`, …).
+Settings missing from the file use their defaults (so older configs get `mouse: true`). Empty or duplicate bindings are reported on startup, reset to defaults and the file is updated — configs from older versions (where `close_tab` and `watch_toggle` were both `w`) are fixed automatically. See the [Bubble Tea key names](https://github.com/charmbracelet/bubbletea) for supported keys (`ctrl+a`, `alt+b`, `f1`, `space`, …).
 
 ## Development
 

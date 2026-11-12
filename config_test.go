@@ -89,3 +89,18 @@ func TestNormalizeKey(t *testing.T) {
 		}
 	}
 }
+
+func TestMouseSettingDefaultsOn(t *testing.T) {
+	if !DefaultConfig().Mouse {
+		t.Fatal("mouse should default to on")
+	}
+	// Configs written before the setting existed keep the default.
+	cfg := DefaultConfig()
+	if err := yaml.Unmarshal([]byte("keybindings:\n  quit: ctrl+c\n"), &cfg); err != nil || !cfg.Mouse {
+		t.Fatalf("old config: mouse=%v err=%v", cfg.Mouse, err)
+	}
+	cfg = DefaultConfig()
+	if err := yaml.Unmarshal([]byte("mouse: false\n"), &cfg); err != nil || cfg.Mouse {
+		t.Fatalf("mouse: false not honoured: %v %v", cfg.Mouse, err)
+	}
+}

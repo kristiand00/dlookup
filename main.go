@@ -11,6 +11,8 @@ import (
 	"runtime/debug"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"dlookup/ui"
 )
 
 // version is set by release builds via -ldflags "-X main.version=...".
@@ -82,8 +84,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	warnMissingCommands(stderr)
 
+	ui.InitZones()
 	m := newMainModel(cli.Targets, cli.LookupType(), cfg, cli.Opts)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	progOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if cfg.Mouse {
+		// Cell motion (not all motion) is enough for menu hover highlighting.
+		progOpts = append(progOpts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(m, progOpts...)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(stderr, "Error running program: %v\n", err)
 		return 1

@@ -12,17 +12,17 @@ import (
 
 // Keybindings defines the configurable key actions.
 //
-// Global keys (quit, new_tab, close_tab, next_tab, prev_tab, export_all) are
-// handled by the tab container; the rest are handled by the active tab. All keys
-// must be distinct so a global key never swallows a tab-level one.
+// All keys are dispatched by the main model to the same actions as the menus
+// and the F-key bar (F1-F10 are fixed alternates and not configurable). All keys
+// must be distinct so one binding never swallows another.
 type Keybindings struct {
 	Quit        string `yaml:"quit"`
-	NewTab      string `yaml:"new_tab"`
+	NewTab      string `yaml:"new_tab"` // Open the New lookup dialog (runs in a new tab)
 	CloseTab    string `yaml:"close_tab"`
 	NextTab     string `yaml:"next_tab"`
 	PrevTab     string `yaml:"prev_tab"`
-	Back        string `yaml:"back"`         // Esc always works as well
-	Confirm     string `yaml:"confirm"`      // Enter key in most contexts
+	Back        string `yaml:"back"`         // Cancel a running lookup / stop watching; Esc works as well
+	Confirm     string `yaml:"confirm"`      // Change lookup (results) / New lookup (home)
 	WatchToggle string `yaml:"watch_toggle"` // Start (interval prompt) / stop watch mode
 	Export      string `yaml:"export"`       // Export the current tab's result to a file
 	ExportAll   string `yaml:"export_all"`   // Export all tabs' results into one file
@@ -61,8 +61,12 @@ func (k *Keybindings) fields() []keybindingField {
 
 // AppConfig holds the application configuration.
 type AppConfig struct {
+	// Mouse enables mouse support (clicking menus, tabs, buttons, wheel
+	// scrolling). It can be toggled at runtime in the Options menu; while it is
+	// on, hold Shift (Option on macOS) to select text with the terminal.
+	// Configs that predate this setting get the default (true).
+	Mouse       bool        `yaml:"mouse"`
 	Keybindings Keybindings `yaml:"keybindings"`
-	// Add other configuration sections here later (e.g., colors, default_interval)
 }
 
 // DefaultKeybindings provides the default key mapping. All values are distinct.
@@ -125,10 +129,6 @@ func keybindingProblems(k *Keybindings) (map[string]bool, error) {
 	return bad, fmt.Errorf("invalid keybindings: %s", strings.Join(problems, "; "))
 }
 
-// sanitizeKeybindings validates k. If it is invalid, each empty or conflicting
-// binding that differs from its default is reset to the default; if that still
-// leaves conflicts, all defaults are used. It returns the usable bindings and the
-// original validation error (nil when k was valid).
 // normalizeKey trims a key name and removes spaces around "+", so that
 // "ctrl + q" matches Bubble Tea's "ctrl+q".
 func normalizeKey(key string) string {
@@ -143,6 +143,10 @@ func normalizeKey(key string) string {
 	return strings.Join(parts, "+")
 }
 
+// sanitizeKeybindings validates k. If it is invalid, each empty or conflicting
+// binding that differs from its default is reset to the default; if that still
+// leaves conflicts, all defaults are used. It returns the usable bindings and the
+// original validation error (nil when k was valid).
 func sanitizeKeybindings(k Keybindings) (Keybindings, error) {
 	for _, f := range k.fields() {
 		*f.val = normalizeKey(*f.val)
@@ -168,6 +172,7 @@ func sanitizeKeybindings(k Keybindings) (Keybindings, error) {
 // DefaultConfig returns the default application configuration.
 func DefaultConfig() AppConfig {
 	return AppConfig{
+		Mouse:       true,
 		Keybindings: DefaultKeybindings(),
 	}
 }

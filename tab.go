@@ -3,19 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -84,70 +79,36 @@ func (m clearStatusMsg) targetTab() int  { return m.tabId }
 type tabState int
 
 const (
-	stateInputDomain tabState = iota
-	stateSelectLookup
+	stateIdle tabState = iota // no lookup yet (or cancelled)
 	stateLoading
 	stateViewResults
 	stateError
-	stateWatchIntervalInput
-	stateExportFilenameInput
-	stateServerInput
-	stateZoneDiffForm
 )
 
-// isModal reports whether s is a modal overlay that returns to lastState.
-func (s tabState) isModal() bool {
-	return s == stateWatchIntervalInput || s == stateExportFilenameInput || s == stateServerInput || s == stateZoneDiffForm
-}
+// tabKind distinguishes the Home (help) tab from lookup tabs.
+type tabKind int
 
-type lookupItem string
-
-func (i lookupItem) FilterValue() string { return string(i) }
-func (i lookupItem) Title() string       { return string(i) }
-func (i lookupItem) Description() string { return "" }
-
-type itemDelegate struct{}
-
-func (d itemDelegate) Height() int                               { return 1 }
-func (d itemDelegate) Spacing() int                              { return 0 }
-func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
-func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
-	i, ok := listItem.(lookupItem)
-	if !ok {
-		return
-	}
-	str := string(i)
-	fn := listNormalTitle.Render
-	if index == m.Index() {
-		fn = listSelectedTitle.Render
-	}
-	fmt.Fprint(w, fn(" "+str))
-	if index == m.Index() {
-		fmt.Fprint(w, listSelectedTitle.Render("> "))
-	}
-}
+const (
+	tabLookup tabKind = iota
+	tabHome
+)
 
 var nextTabID = 0
 
 type tabModel struct {
 	id            int
+	kind          tabKind
 	state         tabState
-	lastState     tabState // state to return to when a modal closes
-	textInput     textinput.Model
-	intervalInput textinput.Model
-	exportInput   textinput.Model
-	serverInput   textinput.Model
-	inputErr      string // validation message for the active input/modal
 	viewport      viewport.Model
-	lookupList    list.Model
 	domain        string
 	lookupType    string
 	result        string
 	hasResult     bool // result holds a successful run of the current domain+lookup
 	err           error
 	loadingMsg    string
-	width         int
-	height        int
+	idleMsg       string // shown in the idle state (e.g. "Lookup cancelled")
+	width         int    // panel interior width
+	height        int    // panel interior height
 	viewportReady bool
 
 	// Watch mode.
@@ -173,161 +134,83 @@ type tabModel struct {
 	cancel     context.CancelFunc
 	lookupOpts lookup.Options
 
-	// Zone diff screen (see zonediff_tui.go).
+	// Zone diff (see zonediff_tui.go).
 	zd zoneDiffState
 }
 
-// newTabModel creates a tab. If both initialDomain and initialLookupType are set
-// (and the lookup type exists), the tab starts loading; the lookup itself is
-// started by Init. opts are this tab's initial lookup options (e.g. DNS server).
+// newTabModel creates a lookup tab sized to the panel interior. If both
+// initialDomain and initialLookupType are set (and the lookup type exists), the
+// tab starts loading; the lookup itself is started by Init. opts are this tab's
+// initial lookup options (e.g. DNS server).
 func newTabModel(width, height int, initialDomain, initialLookupType string, opts lookup.Options) tabModel {
-	ti := textinput.New()
-	ti.Placeholder = "example.com or IP"
-	ti.CharLimit = 256
-	ti.Width = max(40, width-4)
-	ti.PromptStyle = focusedStyle
-	ti.TextStyle = focusedStyle
-	ti.Cursor.Style = cursorStyle
-
-	providers := lookup.AvailableProviders()
-	sort.Slice(providers, func(i, j int) bool {
-		return providers[i].Name() < providers[j].Name()
-	})
-	items := make([]list.Item, 0, len(providers)+1)
-	for _, p := range providers {
-		items = append(items, lookupItem(p.Name()))
-	}
-	items = append(items, lookupItem(zoneDiffName))
-
-	lookupList := list.New(items, itemDelegate{}, width-4, 10)
-	lookupList.Title = "Select Lookup Type:"
-	lookupList.Styles.Title = listHeaderStyle
-	lookupList.SetShowStatusBar(false)
-	lookupList.SetFilteringEnabled(false)
-	lookupList.SetShowHelp(false)
-
-	intervalInput := textinput.New()
-	intervalInput.Placeholder = "Seconds (e.g., 5)"
-	intervalInput.CharLimit = 5
-	intervalInput.Width = 20
-
-	exportInput := textinput.New()
-	exportInput.Placeholder = "path/to/filename.txt"
-	exportInput.CharLimit = 256
-	exportInput.Width = max(50, width-10)
-
-	serverInput := textinput.New()
-	serverInput.Placeholder = "e.g. 1.1.1.1 (empty = system default)"
-	serverInput.CharLimit = 128
-	serverInput.Width = 40
-
 	ctx, cancel := context.WithCancel(context.Background())
-
 	m := tabModel{
-		id:            nextTabID,
-		textInput:     ti,
-		lookupList:    lookupList,
-		width:         width,
-		height:        height,
-		domain:        initialDomain,
-		intervalInput: intervalInput,
-		exportInput:   exportInput,
-		serverInput:   serverInput,
-		lastState:     stateInputDomain,
-		ctx:           ctx,
-		cancel:        cancel,
-		lookupOpts:    opts,
-		zd:            zoneDiffState{form: newZoneDiffForm()},
+		id:         nextTabID,
+		width:      width,
+		height:     height,
+		domain:     initialDomain,
+		ctx:        ctx,
+		cancel:     cancel,
+		lookupOpts: opts,
+		zd:         zoneDiffState{form: newZoneDiffForm()},
 	}
 	nextTabID++
-	m.textInput.SetValue(initialDomain)
-
-	m.state = stateInputDomain
 	if initialDomain != "" && initialLookupType != "" {
 		if _, exists := lookup.GetProvider(initialLookupType); exists {
-			m.state = stateLoading
 			m.lookupType = initialLookupType
+			m.state = stateLoading
 			m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupType, m.domain)
 			m.initCmd = m.startLookup()
 		} else {
 			log.Printf("Warning: Invalid initial lookup type provided: %s", initialLookupType)
 		}
 	}
-	if m.state == stateInputDomain {
-		m.textInput.Focus()
-	}
-
 	m.setSize(width, height)
 	return m
 }
 
+// newHomeTab creates the Home (welcome/help) tab; its content is set by the
+// main model, which knows the keybindings.
+func newHomeTab(width, height int) tabModel {
+	m := newTabModel(width, height, "", "", lookup.Options{})
+	m.kind = tabHome
+	m.setSize(width, height)
+	return m
+}
+
+// homeHeaderHeight is the number of interior rows above the Home viewport
+// (the button row and a blank line).
+const homeHeaderHeight = 2
+
+// setSize sets the panel interior size.
 func (m *tabModel) setSize(width, height int) {
-	m.width = width
-	m.height = height
-
-	tabBarHeight := 1
-	separatorHeight := 1
-	helpHeight := 3
-
-	var tabInternalHeaderHeight int
-	if m.state == stateInputDomain {
-		promptRendered := inputPromptStyle.Render("Enter Domain/IP:")
-		m.textInput.Width = max(40, width-4)
-		inputRendered := m.textInput.View()
-		tabInternalHeaderHeight = lipgloss.Height(promptRendered) + lipgloss.Height(inputRendered) + 1
-	} else {
-		tabInternalHeaderHeight = 1 + 1
+	m.width = max(1, width)
+	m.height = max(1, height)
+	vpHeight := m.height
+	if m.kind == tabHome {
+		vpHeight = max(1, m.height-homeHeaderHeight)
 	}
-
-	listHeight := 0
-	if m.state == stateSelectLookup {
-		listAvailableHeight := height - tabBarHeight - separatorHeight - tabInternalHeaderHeight - helpHeight
-		listContentHeight := max(5, listAvailableHeight-listHeaderStyle.GetVerticalPadding())
-		m.lookupList.SetSize(width-2, listContentHeight)
-		listHeight = m.lookupList.Height()
-	}
-
-	nonViewportHeight := tabBarHeight + separatorHeight + tabInternalHeaderHeight + listHeight + helpHeight
-	vpHeight := max(1, height-nonViewportHeight)
-
-	m.textInput.Width = max(40, width-4)
-
 	if !m.viewportReady {
-		m.viewport = viewport.New(width-2, vpHeight)
+		m.viewport = viewport.New(m.width, vpHeight)
 		m.viewport.Style = lipgloss.NewStyle().Padding(0, 1)
+		m.viewport.KeyMap.Left.SetEnabled(false) // left/right switch tabs
+		m.viewport.KeyMap.Right.SetEnabled(false)
 		m.viewportReady = true
 	} else {
-		m.viewport.Width = width - 2
+		m.viewport.Width = m.width
 		m.viewport.Height = vpHeight
 	}
-	m.viewport.HighPerformanceRendering = false
 }
 
-// Init returns the tab's startup command: its initial lookup (if any) or a
-// cursor blink. mainModel calls it exactly once per tab.
-func (m tabModel) Init() tea.Cmd {
-	if m.initCmd != nil {
-		return m.initCmd
-	}
-	if m.state == stateInputDomain {
-		return textinput.Blink
-	}
-	return nil
-}
+// Init returns the tab's startup command (its initial lookup, if any).
+// mainModel calls it exactly once per tab.
+func (m tabModel) Init() tea.Cmd { return m.initCmd }
 
-// textEntryActive reports whether the tab is in a state where keystrokes are
-// typed into a text input (so printable global keys must not be intercepted).
-func (m tabModel) textEntryActive() bool {
-	switch m.state {
-	case stateInputDomain, stateWatchIntervalInput, stateExportFilenameInput, stateServerInput, stateZoneDiffForm:
-		return true
-	}
-	return false
-}
+func (m tabModel) isHome() bool { return m.kind == tabHome }
 
 // watchAvailable reports whether watch mode applies to the tab's lookup.
 func (m tabModel) watchAvailable() bool {
-	return m.lookupType != "" && m.lookupType != lookup.ComprehensiveReportName && !m.isZoneDiff()
+	return m.kind == tabLookup && m.lookupType != "" && m.lookupType != lookup.ComprehensiveReportName && !m.isZoneDiff()
 }
 
 // resultsVisible reports whether results or an error are shown.
@@ -335,57 +218,13 @@ func (m tabModel) resultsVisible() bool {
 	return m.state == stateViewResults || m.state == stateError
 }
 
-// baseState is the state underneath any open modal.
-func (m tabModel) baseState() tabState {
-	if m.state.isModal() {
-		return m.lastState
-	}
-	return m.state
-}
+// scrollable reports whether the panel shows the tab's viewport.
+func (m tabModel) scrollable() bool { return m.isHome() || m.resultsVisible() }
 
-// setBaseState changes the underlying state without closing an open modal.
-func (m *tabModel) setBaseState(s tabState) {
-	if m.state.isModal() {
-		m.lastState = s
-	} else {
-		m.state = s
-	}
-}
-
-// isBackKey reports whether msg means "back/cancel". Esc always does; the
-// configured Back key does too, except when it is a printable key typed into a
-// text input.
-func isBackKey(msg tea.KeyMsg, k Keybindings, textEntry bool) bool {
-	if msg.Type == tea.KeyEsc {
-		return true
-	}
-	if textEntry && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
-		return false
-	}
-	return msg.String() == k.Back
-}
-
-// openModal switches to a modal state, remembering where to return.
-func (m *tabModel) openModal(s tabState, input *textinput.Model, value string) tea.Cmd {
-	m.lastState = m.state
-	m.state = s
-	m.inputErr = ""
-	input.SetValue(value)
-	input.CursorEnd()
-	m.setSize(m.width, m.height)
-	return input.Focus()
-}
-
-// closeModal returns from a modal to the previous state.
-func (m *tabModel) closeModal() {
-	m.intervalInput.Blur()
-	m.exportInput.Blur()
-	m.serverInput.Blur()
-	m.zd.form.blur()
-	m.inputErr = ""
-	m.state = m.lastState
-	m.setSize(m.width, m.height)
-	m.renderContent()
+// isPlaceholder reports whether the tab is an unused lookup tab that a new
+// lookup may reuse.
+func (m tabModel) isPlaceholder() bool {
+	return m.kind == tabLookup && m.state == stateIdle && !m.hasResult && m.lookupType == "" && !m.inFlight
 }
 
 // stopWatch ends watch mode; pending ticks from the old chain become stale.
@@ -396,6 +235,20 @@ func (m *tabModel) stopWatch() {
 	m.isWatching = false
 	m.diffAdded = nil
 	m.diffRemoved = nil
+}
+
+// startWatch starts watch mode with interval d: one refresh right away, then
+// one per tick.
+func (m *tabModel) startWatch(d time.Duration) tea.Cmd {
+	m.watchInterval = d
+	m.isWatching = true
+	m.watchGen++
+	m.renderContent()
+	cmds := []tea.Cmd{m.watchTick()}
+	if !m.inFlight {
+		cmds = append(cmds, m.startLookup())
+	}
+	return tea.Batch(cmds...)
 }
 
 // cancelLookup aborts any in-flight lookup and makes its result stale.
@@ -410,16 +263,59 @@ func (m *tabModel) cancelLookup() {
 	m.inFlight = false
 }
 
-// goToInput returns to the domain input, stopping watch and any lookup.
-func (m *tabModel) goToInput() tea.Cmd {
+// back cancels a running lookup or stops watching. It returns a status text
+// ("" when there was nothing to do).
+func (m *tabModel) back() string {
+	switch {
+	case m.state == stateLoading:
+		m.stopWatch()
+		m.cancelLookup()
+		m.loadingMsg = ""
+		if m.hasResult || m.zd.result != nil && m.isZoneDiff() {
+			m.state = stateViewResults
+		} else {
+			m.state = stateIdle
+			m.idleMsg = "Lookup cancelled."
+		}
+		m.renderContent()
+		return "Cancelled"
+	case m.isWatching:
+		m.stopWatch()
+		m.cancelLookup()
+		m.renderContent()
+		return "Watch stopped"
+	}
+	return ""
+}
+
+// run starts lookupType on domain with opts in this tab, replacing whatever it
+// showed. Zone diffs use runZoneDiff instead.
+func (m *tabModel) run(domain, lookupType string, opts lookup.Options) tea.Cmd {
 	m.stopWatch()
 	m.cancelLookup()
-	m.state = stateInputDomain
-	m.inputErr = ""
-	m.textInput.SetValue(m.domain)
-	m.textInput.CursorEnd()
-	m.setSize(m.width, m.height)
-	return m.textInput.Focus()
+	if domain != m.domain || lookupType != m.lookupType {
+		m.hasResult = false
+		m.result = ""
+	}
+	m.domain = domain
+	m.lookupType = lookupType
+	m.lookupOpts = opts
+	return m.rerun()
+}
+
+// rerun runs the tab's current lookup again.
+func (m *tabModel) rerun() tea.Cmd {
+	if m.kind != tabLookup || m.lookupType == "" {
+		return nil
+	}
+	if m.isZoneDiff() {
+		return m.runZoneDiff(m.zd.opts)
+	}
+	m.state = stateLoading
+	m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupType, m.domain)
+	m.err = nil
+	m.viewport.GotoTop()
+	return m.startLookup()
 }
 
 // setStatus shows a brief status message and schedules its removal.
@@ -430,24 +326,34 @@ func (m *tabModel) setStatus(text string) tea.Cmd {
 	return tickAfter(statusClearTimeout, func(time.Time) tea.Msg { return clearStatusMsg{tabId: id, seq: seq} })
 }
 
-func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
-	var cmds []tea.Cmd
+// copyCmd copies the visible result to the clipboard and reports via a status.
+func (m tabModel) copyCmd() tea.Cmd {
+	content := m.plainContent()
+	id := m.id
+	return func() tea.Msg {
+		if err := clipboardWriteAll(content); err != nil {
+			return tabStatusMsg{tabId: id, text: fmt.Sprintf("Copy failed: %v", err)}
+		}
+		return tabStatusMsg{tabId: id, text: "Copied result to clipboard"}
+	}
+}
 
-	if m.viewportReady && m.resultsVisible() {
-		if km, ok := msg.(tea.KeyMsg); !ok || !m.isTabKey(km, k) {
+func (m tabModel) Update(msg tea.Msg) (tabModel, tea.Cmd) {
+	if cmd, ok := m.handleZoneDiffMsg(msg); ok {
+		return m, cmd
+	}
+
+	var cmds []tea.Cmd
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		cmds = append(cmds, m.handleKey(msg))
+
+	case tea.MouseMsg:
+		if m.scrollable() {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			cmds = append(cmds, cmd)
 		}
-	}
-
-	if cmd, ok := m.handleZoneDiffMsg(msg); ok {
-		return m, tea.Batch(append(cmds, cmd)...)
-	}
-
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		cmds = append(cmds, m.handleKey(msg, k))
 
 	case watchTickMsg:
 		if msg.tabId != m.id || !m.isWatching || msg.gen != m.watchGen {
@@ -472,14 +378,13 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 		} else {
 			m.diffAdded, m.diffRemoved = nil, nil
 		}
-		wasVisible := m.baseState() == stateViewResults
+		wasVisible := m.state == stateViewResults
 		m.result = msg.output
 		m.hasResult = true
 		m.err = nil
 		m.loadingMsg = ""
 		m.lastUpdated = now()
-		m.setBaseState(stateViewResults)
-		m.setSize(m.width, m.height)
+		m.state = stateViewResults
 		m.renderContent()
 		if !(m.isWatching && wasVisible) {
 			m.viewport.GotoTop()
@@ -494,8 +399,7 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 		m.err = msg.err
 		m.loadingMsg = ""
 		m.lastUpdated = now()
-		m.setBaseState(stateError)
-		m.setSize(m.width, m.height)
+		m.state = stateError
 		m.renderContent()
 		if !m.isWatching {
 			m.viewport.GotoTop()
@@ -510,246 +414,32 @@ func (m tabModel) Update(msg tea.Msg, k Keybindings) (tabModel, tea.Cmd) {
 		if msg.tabId == m.id && msg.seq == m.statusSeq {
 			m.statusMsg = ""
 		}
-
-	default:
-		// Cursor blinks etc. go to whichever input is active.
-		var cmd tea.Cmd
-		switch m.state {
-		case stateInputDomain:
-			m.textInput, cmd = m.textInput.Update(msg)
-		case stateWatchIntervalInput:
-			m.intervalInput, cmd = m.intervalInput.Update(msg)
-		case stateExportFilenameInput:
-			m.exportInput, cmd = m.exportInput.Update(msg)
-		case stateServerInput:
-			m.serverInput, cmd = m.serverInput.Update(msg)
-		case stateZoneDiffForm:
-			if in := m.zd.form.input(m.zd.form.focus); in != nil {
-				*in, cmd = in.Update(msg)
-			}
-		}
-		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)
 }
 
-// isTabKey reports whether km is one of the tab's configured action keys in the
-// results view (so it is not also forwarded to the viewport).
-func (m tabModel) isTabKey(km tea.KeyMsg, k Keybindings) bool {
-	switch km.String() {
-	case k.Back, k.WatchToggle, k.Export, k.Copy, k.Server, k.ZoneDiff:
-		return true
-	case k.ToggleMatches:
-		return m.isZoneDiff()
-	}
-	return false
-}
-
-func (m *tabModel) handleKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
-	key := msg.String()
-	switch m.state {
-	case stateViewResults, stateError:
-		if m.isZoneDiff() {
-			if isBackKey(msg, k, false) {
-				return m.goToSelect()
-			}
-			if cmd, ok := m.handleZoneDiffResultKey(msg, k); ok {
-				return cmd
-			}
-		}
-		switch {
-		case isBackKey(msg, k, false):
-			return m.goToInput()
-		case key == k.ZoneDiff:
-			return m.openZoneDiffForm()
-		case key == k.WatchToggle:
-			if !m.watchAvailable() {
-				return nil
-			}
-			if m.isWatching {
-				m.stopWatch()
-				m.renderContent()
-				return m.setStatus("Watch stopped")
-			}
-			value := ""
-			if m.watchInterval > 0 {
-				value = strconv.Itoa(int(m.watchInterval / time.Second))
-			}
-			return m.openModal(stateWatchIntervalInput, &m.intervalInput, value)
-		case key == k.Export:
-			return m.openModal(stateExportFilenameInput, &m.exportInput, defaultExportFilename(m.domain, m.lookupType, now()))
-		case key == k.Copy:
-			content := m.plainContent()
-			id := m.id
-			return func() tea.Msg {
-				if err := clipboardWriteAll(content); err != nil {
-					return tabStatusMsg{tabId: id, text: fmt.Sprintf("Copy failed: %v", err)}
-				}
-				return tabStatusMsg{tabId: id, text: "Copied result to clipboard"}
-			}
-		case key == k.Server:
-			if m.isZoneDiff() {
-				return nil // the zone diff form has its own servers
-			}
-			return m.openModal(stateServerInput, &m.serverInput, m.lookupOpts.Server)
-		case key == "home" || key == "g":
-			m.viewport.GotoTop()
-		case key == "end" || key == "G":
-			m.viewport.GotoBottom()
-		}
+// handleKey handles keys not bound to a global action: scrolling and the zone
+// diff filter keys.
+func (m *tabModel) handleKey(msg tea.KeyMsg) tea.Cmd {
+	if !m.scrollable() {
 		return nil
-
-	case stateInputDomain:
-		if key == k.Confirm {
-			trimmed := strings.TrimSpace(m.textInput.Value())
-			if err := lookup.ValidateTarget(trimmed); err != nil {
-				m.inputErr = fmt.Sprintf("Invalid target: %v", err)
-				return nil
-			}
-			if trimmed != m.domain {
-				m.hasResult = false
-				m.result = ""
-			}
-			m.domain = trimmed
-			m.inputErr = ""
-			m.state = stateSelectLookup
-			m.textInput.Blur()
-			m.lookupList.ResetFilter()
-			m.lookupList.Select(0)
-			m.setSize(m.width, m.height)
-			return nil
-		}
-		var cmd tea.Cmd
-		m.textInput, cmd = m.textInput.Update(msg)
-		m.inputErr = ""
-		return cmd
-
-	case stateSelectLookup:
-		switch {
-		case isBackKey(msg, k, false):
-			return m.goToInput()
-		case key == k.Server:
-			return m.openModal(stateServerInput, &m.serverInput, m.lookupOpts.Server)
-		case key == k.ZoneDiff:
-			return m.openZoneDiffForm()
-		case key == k.Confirm:
-			selected := m.lookupList.SelectedItem()
-			if selected == nil {
-				return nil
-			}
-			if selected.(lookupItem).FilterValue() == zoneDiffName {
-				return m.openZoneDiffForm()
-			}
-			m.stopWatch()
-			m.lookupType = selected.(lookupItem).FilterValue()
-			m.state = stateLoading
-			m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupType, m.domain)
-			m.err = nil
-			m.result = ""
-			m.hasResult = false
-			m.viewport.GotoTop()
-			m.setSize(m.width, m.height)
-			return m.startLookup()
-		}
-		var cmd tea.Cmd
-		m.lookupList, cmd = m.lookupList.Update(msg)
-		return cmd
-
-	case stateWatchIntervalInput:
-		switch {
-		case key == k.Confirm:
-			sec, err := strconv.Atoi(strings.TrimSpace(m.intervalInput.Value()))
-			if err != nil || sec <= 0 {
-				m.inputErr = "Enter a whole number of seconds greater than 0"
-				return nil
-			}
-			m.watchInterval = time.Duration(sec) * time.Second
-			m.isWatching = true
-			m.watchGen++
-			m.closeModal()
-			// Refresh in place right away, then on every tick.
-			cmds := []tea.Cmd{m.watchTick()}
-			if !m.inFlight {
-				cmds = append(cmds, m.startLookup())
-			}
-			return tea.Batch(cmds...)
-		case isBackKey(msg, k, true):
-			m.closeModal()
-			return nil
-		}
-		var cmd tea.Cmd
-		m.intervalInput, cmd = m.intervalInput.Update(msg)
-		m.inputErr = ""
-		return cmd
-
-	case stateServerInput:
-		switch {
-		case key == k.Confirm:
-			server := strings.TrimSpace(m.serverInput.Value())
-			if server != "" {
-				if err := lookup.ValidateServer(server); err != nil {
-					m.inputErr = fmt.Sprintf("Invalid server: %v", err)
-					return nil
-				}
-			}
-			changed := server != m.lookupOpts.Server
-			m.lookupOpts.Server = server
-			m.closeModal()
-			label := server
-			if label == "" {
-				label = "system default"
-			}
-			cmds := []tea.Cmd{m.setStatus("DNS server: " + label)}
-			if changed && m.resultsVisible() && m.lookupType != "" {
-				m.cancelLookup()
-				cmds = append(cmds, m.startLookup())
-			}
-			return tea.Batch(cmds...)
-		case isBackKey(msg, k, true):
-			m.closeModal()
-			return nil
-		}
-		var cmd tea.Cmd
-		m.serverInput, cmd = m.serverInput.Update(msg)
-		m.inputErr = ""
-		return cmd
-
-	case stateExportFilenameInput:
-		switch {
-		case key == k.Confirm:
-			filename := strings.TrimSpace(m.exportInput.Value())
-			if filename == "" {
-				m.inputErr = "Filename cannot be empty"
-				return nil
-			}
-			path, err := writeExportFile(filename, m.plainContent())
-			if err != nil {
-				m.inputErr = err.Error()
-				return nil
-			}
-			m.closeModal()
-			return m.setStatus("Saved to " + path)
-		case isBackKey(msg, k, true):
-			m.closeModal()
-			return nil
-		}
-		var cmd tea.Cmd
-		m.exportInput, cmd = m.exportInput.Update(msg)
-		m.inputErr = ""
-		return cmd
-
-	case stateZoneDiffForm:
-		return m.handleZoneDiffFormKey(msg, k)
-
-	case stateLoading:
-		if isBackKey(msg, k, false) {
-			if m.isZoneDiff() {
-				return m.goToSelect()
-			}
-			return m.goToInput()
+	}
+	if m.isZoneDiff() && m.state == stateViewResults {
+		if cmd, ok := m.handleZoneDiffFilterKey(msg.String()); ok {
+			return cmd
 		}
 	}
-	return nil
+	switch msg.String() {
+	case "home", "g":
+		m.viewport.GotoTop()
+		return nil
+	case "end", "G":
+		m.viewport.GotoBottom()
+		return nil
+	}
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return cmd
 }
 
 // watchTick schedules the next tick of the current watch chain. Only the id,
@@ -770,11 +460,11 @@ func (m tabModel) watchLabel() string {
 // renderContent renders the result or error (with watch header and diff) into
 // the viewport. It is the single rendering path for results, errors and resizes.
 func (m *tabModel) renderContent() {
-	if !m.viewportReady {
+	if !m.viewportReady || m.isHome() {
 		return
 	}
 	var b strings.Builder
-	switch m.baseState() {
+	switch m.state {
 	case stateViewResults:
 		if m.isZoneDiff() {
 			m.viewport.SetContent(m.renderZoneDiff())
@@ -823,7 +513,7 @@ func (m *tabModel) renderContent() {
 // plainContent is the unstyled text of the visible result or error, used for
 // export and clipboard.
 func (m tabModel) plainContent() string {
-	switch m.baseState() {
+	switch m.state {
 	case stateViewResults:
 		if m.isZoneDiff() {
 			return m.zoneDiffPlain()
@@ -837,92 +527,53 @@ func (m tabModel) plainContent() string {
 	return "(no results)"
 }
 
-func (m tabModel) View() string {
-	var b strings.Builder
-	switch m.state {
-	case stateInputDomain:
-		b.WriteString(inputPromptStyle.Render("Enter Domain/IP:"))
-		b.WriteString("\n")
-		b.WriteString(lipgloss.NewStyle().Padding(0, 1).Render(m.textInput.View()))
-		b.WriteString("\n")
-		if m.inputErr != "" {
-			b.WriteString(validationStyle.Render(m.inputErr))
-		}
-	case stateWatchIntervalInput, stateExportFilenameInput, stateServerInput, stateZoneDiffForm:
-		b.WriteString("\n")
-	default:
-		b.WriteString(m.compactHeader())
+// panelTitle is the title shown in the panel's top border:
+// "domain · lookup · @server · [watching 5s]".
+func (m tabModel) panelTitle() string {
+	if m.isHome() {
+		return "Home"
 	}
-	b.WriteString("\n")
-
-	mainContentStyle := lipgloss.NewStyle().Padding(0, 1)
-	switch m.state {
-	case stateSelectLookup:
-		b.WriteString(m.lookupList.View())
-	case stateLoading:
-		b.WriteString(loadingStyle.Render(m.loadingMsg))
-	case stateError, stateViewResults:
-		if m.viewportReady {
-			b.WriteString(m.viewport.View())
-		} else {
-			b.WriteString(mainContentStyle.Render(errorStyle.Render(fmt.Sprintf("Error: %v", m.err))))
-		}
-	case stateWatchIntervalInput:
-		b.WriteString(m.modal(40, colorPink, "Enter watch interval (seconds):", m.intervalInput.View(), "(Enter to start, Esc to cancel)"))
-	case stateServerInput:
-		b.WriteString(m.modal(50, colorLightBlue, "DNS server for this tab (empty = system default):", m.serverInput.View(), "(Enter to set, Esc to cancel)"))
-	case stateExportFilenameInput:
-		b.WriteString(m.modal(max(60, m.width/2), colorGreen, "Enter filename/path to export results:", m.exportInput.View(), "(Enter to save, Esc to cancel)"))
-	case stateZoneDiffForm:
-		b.WriteString(m.zoneDiffFormView())
+	if m.domain == "" {
+		return "New tab"
 	}
-	return b.String()
-}
-
-// compactHeader renders the one-line "Domain | Lookup | Server [Watching]" header.
-func (m tabModel) compactHeader() string {
-	watchStatus := m.watchLabel()
-	if m.isWatching && m.inFlight {
-		watchStatus += " ⟳"
-	}
-	maxDomain := max(10, m.width-25-lipgloss.Width(watchStatus))
-	header := "Domain: " + truncateWidth(m.domain, maxDomain)
+	parts := []string{m.domain}
 	if m.lookupType != "" {
-		lookupStr := " | Lookup: " + m.lookupType
-		if m.state == stateLoading {
-			lookupStr = fmt.Sprintf(" | Running %s...", m.lookupType)
-		}
-		if m.isZoneDiff() && m.zd.opts.NewServer != "" {
-			lookupStr += " ⇄ " + m.zd.opts.NewServer
-		}
-		if lipgloss.Width(header+lookupStr+watchStatus) < m.width-2 {
-			header += lookupStr
-		}
+		parts = append(parts, m.lookupType)
 	}
-	if m.lookupOpts.Server != "" && !m.isZoneDiff() {
-		serverStr := " | Server: " + m.lookupOpts.Server
-		if lipgloss.Width(header+serverStr+watchStatus) < m.width-2 {
-			header += serverStr
+	if m.isZoneDiff() {
+		if m.zd.opts.NewServer != "" {
+			parts = append(parts, "⇄ "+m.zd.opts.NewServer)
 		}
+	} else if m.lookupOpts.Server != "" {
+		parts = append(parts, "@"+m.lookupOpts.Server)
 	}
-	header += watchStatus
-	header = truncateWidth(header, max(1, m.width-4))
-	return lipgloss.NewStyle().Foreground(colorLightGrey).Padding(0, 1).MaxHeight(1).Width(max(1, m.width-2)).Render(header)
+	if m.isWatching {
+		w := fmt.Sprintf("[watching %s]", m.watchInterval)
+		if m.inFlight {
+			w += " ⟳"
+		}
+		parts = append(parts, w)
+	}
+	return strings.Join(parts, " · ")
 }
 
-// modal renders a centered bordered box with a prompt, an input and a hint;
-// validation errors are shown on their own line, never inside the input.
-func (m tabModel) modal(width int, border lipgloss.Color, prompt, input, hint string) string {
-	lines := []string{prompt, input}
-	if m.inputErr != "" {
-		lines = append(lines, errorStyle.Render(m.inputErr))
+// body renders the panel interior for lookup tabs (Home is rendered by the
+// main model).
+func (m tabModel) body() string {
+	switch m.state {
+	case stateLoading:
+		return loadingStyle.Render(m.loadingMsg) + "\n" + helpDescStyle.Padding(0, 1).Render("esc/q cancels")
+	case stateViewResults, stateError:
+		return m.viewport.View()
 	}
-	lines = append(lines, hint)
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(border).
-		Padding(1, 2).Width(width)
-	return lipgloss.Place(m.width, max(1, m.height-2), lipgloss.Center, lipgloss.Center, style.Render(strings.Join(lines, "\n")))
+	if m.domain != "" {
+		msg := fmt.Sprintf("No lookup selected for %s.", m.domain)
+		if m.idleMsg != "" {
+			msg = m.idleMsg
+		}
+		return lipgloss.NewStyle().Padding(1, 2).Render(msg + "\n\n" + helpDescStyle.Render("Press F3 or Enter to choose a lookup."))
+	}
+	return lipgloss.NewStyle().Padding(1, 2).Render("Empty tab.\n\n" + helpDescStyle.Render("Press F2 or n for a new lookup."))
 }
 
 // startLookup starts a new lookup run for the tab's domain and lookup type,

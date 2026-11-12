@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -26,74 +25,17 @@ const zoneDiffProgressInterval = 150 * time.Millisecond
 // diffZoneFunc runs a zone diff; replaced in tests.
 var diffZoneFunc = lookup.DiffZone
 
-// Zone diff form fields, in tab order.
-const (
-	zdFieldNew = iota
-	zdFieldOld
-	zdFieldExtra
-	zdFieldTTL
-	zdFieldAXFR
-	zdFieldCount
-)
-
-// zoneDiffForm holds the zone diff form inputs. It lives on the tab, so the last
-// values are kept for quick re-runs.
+// zoneDiffForm holds the zone diff dialog values. It lives on the tab, so the
+// last values are kept for quick re-runs.
 type zoneDiffForm struct {
-	newServer  textinput.Model
-	oldServer  textinput.Model
-	extraNames textinput.Model
+	newServer  string
+	oldServer  string
+	extraNames string
 	compareTTL bool
 	tryAXFR    bool
-	focus      int
 }
 
-func newZoneDiffForm() zoneDiffForm {
-	mk := func(placeholder string, limit int) textinput.Model {
-		ti := textinput.New()
-		ti.Placeholder = placeholder
-		ti.CharLimit = limit
-		ti.Width = 36
-		ti.Prompt = ""
-		return ti
-	}
-	return zoneDiffForm{
-		newServer:  mk("new server IP or hostname", 128),
-		oldServer:  mk("authoritative NS (auto)", 128),
-		extraNames: mk("e.g. www, mail, _dmarc", 512),
-		compareTTL: false,
-		tryAXFR:    true,
-	}
-}
-
-// input returns the text input for field f, or nil for checkbox fields.
-func (f *zoneDiffForm) input(field int) *textinput.Model {
-	switch field {
-	case zdFieldNew:
-		return &f.newServer
-	case zdFieldOld:
-		return &f.oldServer
-	case zdFieldExtra:
-		return &f.extraNames
-	}
-	return nil
-}
-
-func (f *zoneDiffForm) blur() {
-	f.newServer.Blur()
-	f.oldServer.Blur()
-	f.extraNames.Blur()
-}
-
-// setFocus moves focus to field (wrapping) and returns the cursor blink command.
-func (f *zoneDiffForm) setFocus(field int) tea.Cmd {
-	f.focus = (field%zdFieldCount + zdFieldCount) % zdFieldCount
-	f.blur()
-	if in := f.input(f.focus); in != nil {
-		in.CursorEnd()
-		return in.Focus()
-	}
-	return nil
-}
+func newZoneDiffForm() zoneDiffForm { return zoneDiffForm{tryAXFR: true} }
 
 // zoneDiffProgress is written by DiffZone's Progress callback (from any
 // goroutine) and polled by the tab.
@@ -131,16 +73,6 @@ func (m zoneDiffProgressMsg) targetTab() int { return m.tabId }
 // isZoneDiff reports whether the tab's current lookup is a zone diff.
 func (m tabModel) isZoneDiff() bool { return m.lookupType == zoneDiffName }
 
-// openZoneDiffForm opens the zone diff form as a modal over the current state,
-// keeping the values of the previous run.
-func (m *tabModel) openZoneDiffForm() tea.Cmd {
-	m.lastState = m.state
-	m.state = stateZoneDiffForm
-	m.inputErr = ""
-	m.setSize(m.width, m.height)
-	return m.zd.form.setFocus(zdFieldNew)
-}
-
 // parseExtraNames splits a comma (or whitespace) separated list of names.
 func parseExtraNames(s string) []string {
 	var out []string
@@ -152,83 +84,54 @@ func parseExtraNames(s string) []string {
 	return out
 }
 
-// zoneDiffOptionsFromForm validates the form and builds the run options.
-func (m tabModel) zoneDiffOptionsFromForm() (lookup.ZoneDiffOptions, error) {
-	f := m.zd.form
-	if m.domain == "" || net.ParseIP(m.domain) != nil {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("zone diff needs a domain name, not %q", m.domain)
+// zoneDiffOptions validates a zone diff request and builds the run options.
+func zoneDiffOptions(domain string, f zoneDiffForm) (lookup.ZoneDiffOptions, error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return lookup.ZoneDiffOptions{}, fmt.Errorf("domain is required")
 	}
-	newServer := strings.TrimSpace(f.newServer.Value())
+	if net.ParseIP(domain) != nil {
+		return lookup.ZoneDiffOptions{}, fmt.Errorf("zone diff needs a domain name, not %q", domain)
+	}
+	if err := lookup.ValidateTarget(domain); err != nil {
+		return lookup.ZoneDiffOptions{}, fmt.Errorf("domain: %w", err)
+	}
+	newServer := strings.TrimSpace(f.newServer)
 	if newServer == "" {
 		return lookup.ZoneDiffOptions{}, fmt.Errorf("new server is required")
 	}
 	if err := lookup.ValidateServer(newServer); err != nil {
 		return lookup.ZoneDiffOptions{}, fmt.Errorf("new server: %w", err)
 	}
-	oldServer := strings.TrimSpace(f.oldServer.Value())
+	oldServer := strings.TrimSpace(f.oldServer)
 	if oldServer != "" {
 		if err := lookup.ValidateServer(oldServer); err != nil {
 			return lookup.ZoneDiffOptions{}, fmt.Errorf("old server: %w", err)
 		}
 	}
 	return lookup.ZoneDiffOptions{
-		Domain:     m.domain,
+		Domain:     domain,
 		OldServer:  oldServer,
 		NewServer:  newServer,
-		ExtraNames: parseExtraNames(f.extraNames.Value()),
+		ExtraNames: parseExtraNames(f.extraNames),
 		CompareTTL: f.compareTTL,
 		TryAXFR:    f.tryAXFR,
 	}, nil
 }
 
-// handleZoneDiffFormKey handles keys while the zone diff form is open.
-func (m *tabModel) handleZoneDiffFormKey(msg tea.KeyMsg, k Keybindings) tea.Cmd {
-	f := &m.zd.form
-	key := msg.String()
-	switch {
-	case key == k.Confirm:
-		opts, err := m.zoneDiffOptionsFromForm()
-		if err != nil {
-			m.inputErr = err.Error()
-			return nil
-		}
-		f.blur()
-		m.inputErr = ""
-		m.stopWatch()
-		m.lookupType = zoneDiffName
-		m.zd.opts = opts
-		m.state = stateLoading
-		m.err = nil
-		m.result = ""
-		m.hasResult = false
-		m.viewport.GotoTop()
-		m.setSize(m.width, m.height)
-		return m.startZoneDiff()
-	case isBackKey(msg, k, true):
-		m.closeModal()
-		return nil
-	case key == "tab" || key == "down":
-		m.inputErr = ""
-		return f.setFocus(f.focus + 1)
-	case key == "shift+tab" || key == "up":
-		m.inputErr = ""
-		return f.setFocus(f.focus - 1)
-	}
-	in := f.input(f.focus)
-	if in == nil {
-		if msg.Type == tea.KeySpace || key == " " || key == "x" {
-			if f.focus == zdFieldTTL {
-				f.compareTTL = !f.compareTTL
-			} else {
-				f.tryAXFR = !f.tryAXFR
-			}
-		}
-		return nil
-	}
-	var cmd tea.Cmd
-	*in, cmd = in.Update(msg)
-	m.inputErr = ""
-	return cmd
+// runZoneDiff starts a zone diff with opts in this tab, replacing whatever it
+// showed.
+func (m *tabModel) runZoneDiff(opts lookup.ZoneDiffOptions) tea.Cmd {
+	m.stopWatch()
+	m.domain = opts.Domain
+	m.lookupType = zoneDiffName
+	m.zd.opts = opts
+	m.state = stateLoading
+	m.err = nil
+	m.result = ""
+	m.hasResult = false
+	m.viewport.GotoTop()
+	return m.startZoneDiff()
 }
 
 // zoneDiffLoadingMsg is the loading line for the current run.
@@ -313,8 +216,7 @@ func (m *tabModel) handleZoneDiffMsg(msg tea.Msg) (cmd tea.Cmd, ok bool) {
 		m.err = nil
 		m.loadingMsg = ""
 		m.lastUpdated = now()
-		m.setBaseState(stateViewResults)
-		m.setSize(m.width, m.height)
+		m.state = stateViewResults
 		m.renderContent()
 		m.viewport.GotoTop()
 		return nil, true
@@ -331,53 +233,42 @@ var zoneDiffFilterKeys = map[string]lookup.DiffStatus{
 	"5": lookup.DiffMatch,
 }
 
-// handleZoneDiffResultKey handles zone-diff-only keys in the results/error
-// view. handled is false when the key is not one of them.
-func (m *tabModel) handleZoneDiffResultKey(msg tea.KeyMsg, k Keybindings) (cmd tea.Cmd, handled bool) {
-	key := msg.String()
-	switch {
-	case key == k.Confirm || key == "r":
-		return m.openZoneDiffForm(), true
-	case key == k.ToggleMatches:
-		m.zd.showMatches = !m.zd.showMatches
-		if !m.zd.showMatches && m.zd.filtered && m.zd.filter == lookup.DiffMatch {
-			m.zd.filtered = false
-		}
-		m.renderContent()
-		m.viewport.GotoTop()
-		if m.zd.showMatches {
-			return m.setStatus("Showing matching records"), true
-		}
-		return m.setStatus("Hiding matching records"), true
-	case key == "0":
+// toggleMatches shows/hides matching records in the zone diff view.
+func (m *tabModel) toggleMatches() tea.Cmd {
+	m.zd.showMatches = !m.zd.showMatches
+	if !m.zd.showMatches && m.zd.filtered && m.zd.filter == lookup.DiffMatch {
 		m.zd.filtered = false
-		m.renderContent()
-		m.viewport.GotoTop()
-		return nil, true
 	}
-	if st, ok := zoneDiffFilterKeys[key]; ok {
+	m.renderContent()
+	m.viewport.GotoTop()
+	if m.zd.showMatches {
+		return m.setStatus("Showing matching records")
+	}
+	return m.setStatus("Hiding matching records")
+}
+
+// setZoneDiffFilter shows only records with status key ("1"-"5"); "0" clears
+// the filter and choosing the active filter again toggles it off.
+func (m *tabModel) setZoneDiffFilter(key string) bool {
+	if key == "0" {
+		m.zd.filtered = false
+	} else if st, ok := zoneDiffFilterKeys[key]; ok {
 		if m.zd.filtered && m.zd.filter == st {
 			m.zd.filtered = false
 		} else {
 			m.zd.filtered, m.zd.filter = true, st
 		}
-		m.renderContent()
-		m.viewport.GotoTop()
-		return nil, true
+	} else {
+		return false
 	}
-	return nil, false
+	m.renderContent()
+	m.viewport.GotoTop()
+	return true
 }
 
-// goToSelect returns to the lookup list, stopping any run.
-func (m *tabModel) goToSelect() tea.Cmd {
-	m.stopWatch()
-	m.cancelLookup()
-	m.zd.form.blur()
-	m.state = stateSelectLookup
-	m.inputErr = ""
-	m.loadingMsg = ""
-	m.setSize(m.width, m.height)
-	return nil
+// handleZoneDiffFilterKey handles the number filter keys in zone diff results.
+func (m *tabModel) handleZoneDiffFilterKey(key string) (tea.Cmd, bool) {
+	return nil, m.setZoneDiffFilter(key)
 }
 
 // zoneDiffStatusOrder is the display order of record groups.
@@ -539,39 +430,4 @@ func (m tabModel) zoneDiffPlain() string {
 		return "(no results)"
 	}
 	return lookup.FormatZoneDiff(m.zd.result, m.zd.showMatches)
-}
-
-// zoneDiffFormView renders the zone diff form modal.
-func (m tabModel) zoneDiffFormView() string {
-	f := m.zd.form
-	row := func(field int, label, body string) string {
-		marker := "  "
-		ls := zdLabelStyle
-		if f.focus == field {
-			marker = focusedStyle.Render("> ")
-			ls = focusedStyle
-		}
-		return marker + ls.Render(fmt.Sprintf("%-13s", label)) + body
-	}
-	check := func(field int, on bool, label string) string {
-		box := "[ ]"
-		if on {
-			box = "[x]"
-		}
-		marker := "  "
-		if f.focus == field {
-			marker = focusedStyle.Render("> ")
-			box = focusedStyle.Render(box)
-		}
-		return marker + box + " " + label
-	}
-	body := strings.Join([]string{
-		row(zdFieldNew, "New server:", f.newServer.View()),
-		row(zdFieldOld, "Old server:", f.oldServer.View()),
-		row(zdFieldExtra, "Extra names:", f.extraNames.View()),
-		check(zdFieldTTL, f.compareTTL, "Compare TTLs"),
-		check(zdFieldAXFR, f.tryAXFR, "Try AXFR"),
-	}, "\n")
-	return m.modal(min(max(60, m.width/2), max(20, m.width-2)), colorCyan, "Zone diff for "+m.domain+"\n", body,
-		"(tab/shift+tab move · space toggle · enter run · esc cancel)")
 }

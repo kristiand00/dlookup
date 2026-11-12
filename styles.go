@@ -6,30 +6,17 @@ import (
 )
 
 var (
-	colorPink       = lipgloss.Color("205")
-	colorLightBlue  = lipgloss.Color("81")
-	colorGrey       = lipgloss.Color("240")
-	colorLightGrey  = lipgloss.Color("244")
-	colorActiveGrey = lipgloss.Color("247")
-	colorRed        = lipgloss.Color("196")
-	colorOrange     = lipgloss.Color("214")
-	colorGreen      = lipgloss.Color("78")
-	colorHelpKey    = lipgloss.Color("81")
-	colorHelpDesc   = lipgloss.Color("241")
-	colorCyan       = lipgloss.Color("45")
-
-	tabStyle = lipgloss.NewStyle().
-			Foreground(colorLightGrey).
-			Padding(0, 1)
-
-	activeTabStyle = tabStyle.
-			Foreground(colorPink).
-			Background(colorActiveGrey).
-			Bold(true)
-
-	inputPromptStyle = lipgloss.NewStyle().Foreground(colorPink).Padding(0, 1)
-	focusedStyle     = lipgloss.NewStyle().Foreground(colorPink)
-	cursorStyle      = focusedStyle
+	colorLightBlue = lipgloss.Color("81")
+	colorGrey      = lipgloss.Color("240")
+	colorLightGrey = lipgloss.Color("244")
+	colorYellow    = lipgloss.Color("221")
+	colorBlack     = lipgloss.Color("16")
+	colorRed       = lipgloss.Color("196")
+	colorOrange    = lipgloss.Color("214")
+	colorGreen     = lipgloss.Color("78")
+	colorHelpKey   = lipgloss.Color("81")
+	colorHelpDesc  = lipgloss.Color("241")
+	colorCyan      = lipgloss.Color("45")
 
 	resultHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
@@ -42,30 +29,26 @@ var (
 	errorStyle   = lipgloss.NewStyle().Foreground(colorRed)
 	loadingStyle = lipgloss.NewStyle().Foreground(colorOrange).Padding(1, 1)
 
-	helpKeyStyle       = lipgloss.NewStyle().Foreground(colorHelpKey)
-	helpDescStyle      = lipgloss.NewStyle().Foreground(colorHelpDesc)
-	helpContainerStyle = lipgloss.NewStyle().Padding(1, 1)
+	helpKeyStyle  = lipgloss.NewStyle().Foreground(colorHelpKey)
+	helpDescStyle = lipgloss.NewStyle().Foreground(colorHelpDesc)
 
-	listHeaderStyle = lipgloss.NewStyle().
-			Foreground(colorGreen).
-			Padding(1, 0, 1, 1)
+	// Panel (the active tab's bordered box).
+	panelBorderStyle = lipgloss.NewStyle().Foreground(colorCyan)
+	panelTitleStyle  = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
+	scrollTrackStyle = lipgloss.NewStyle().Foreground(colorGrey)
+	scrollThumbStyle = lipgloss.NewStyle().Foreground(colorCyan)
 
-	listNormalTitle = lipgloss.NewStyle().
-			Foreground(colorLightGrey).
-			Padding(0, 0, 0, 1)
+	// Home / help screen.
+	homeTitleStyle   = lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
+	homeSectionStyle = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
+	homeButtonStyle  = lipgloss.NewStyle().Foreground(colorBlack).Background(colorCyan).Bold(true)
 
-	listSelectedTitle = lipgloss.NewStyle().
-				Foreground(colorPink).
-				Border(lipgloss.NormalBorder(), false, false, false, true).
-				BorderForeground(colorPink).
-				Padding(0, 0, 0, 1)
+	hintStyle = lipgloss.NewStyle().Foreground(colorHelpDesc).Padding(0, 1)
 
 	diffAddStyle    = lipgloss.NewStyle().Foreground(colorGreen)
 	diffRemoveStyle = lipgloss.NewStyle().Foreground(colorRed)
 	watchInfoStyle  = lipgloss.NewStyle().Foreground(colorOrange)
 	statusStyle     = lipgloss.NewStyle().Foreground(colorGreen).Padding(0, 1)
-	validationStyle = lipgloss.NewStyle().Foreground(colorRed).Padding(0, 1)
-	changedStyle    = lipgloss.NewStyle().Foreground(colorOrange).Bold(true)
 
 	// Zone diff.
 	zdMatchStyle   = lipgloss.NewStyle().Foreground(colorGreen)
