@@ -212,26 +212,142 @@ func (m *mainModel) syncLookupDialog() tea.Cmd {
 	return d.Init()
 }
 
-// openZoneDiffDialog opens the zone diff dialog prefilled with domain and form.
-func (m *mainModel) openZoneDiffDialog(tabID int, domain string, f zoneDiffForm) tea.Cmd {
-	d := ui.NewDialog("dl-dlg-zonediff", "Zone diff", []ui.Field{
+// zoneDiffSourceOptions are the old/new source choices of the zone diff dialog.
+var (
+	zoneDiffOldSources = []ui.Option{
+		{Label: "Authoritative servers (auto)", Value: zdSrcAuth},
+		{Label: "Server…", Value: zdSrcServer},
+		{Label: "Zone file…", Value: zdSrcFile},
+	}
+	zoneDiffNewSources = []ui.Option{
+		{Label: "Server…", Value: zdSrcServer},
+		{Label: "Zone file…", Value: zdSrcFile},
+		{Label: "Live authoritative (old = file)", Value: zdSrcAuth},
+	}
+)
+
+const zoneFilePlaceholder = "export: BIND, Cloudflare/Route 53 JSON, YAML, CSV"
+
+// zoneDiffDialogFields builds the zone diff dialog fields; the server and
+// zone file fields are shown according to the chosen sources.
+func zoneDiffDialogFields(domain string, f zoneDiffForm) []ui.Field {
+	oldSrc, newSrc := f.sources()
+	fields := []ui.Field{
 		{Key: "domain", Label: "Domain", Kind: ui.FieldText, Value: domain, Placeholder: "example.com", CharLimit: lookup.MaxTargetLength},
-		{Key: "new", Label: "New server", Kind: ui.FieldText, Value: f.newServer, Placeholder: "new server IP or hostname", CharLimit: 128},
-		{Key: "old", Label: "Old server", Kind: ui.FieldText, Value: f.oldServer, Placeholder: "authoritative NS (auto)", CharLimit: 128},
-		{Key: "extra", Label: "Extra names", Kind: ui.FieldText, Value: f.extraNames, Placeholder: "e.g. www, mail, _dmarc", CharLimit: 512},
-		{Key: "ttl", Label: "Compare TTLs", Kind: ui.FieldCheckbox, Checked: f.compareTTL},
-		{Key: "axfr", Label: "Try AXFR", Kind: ui.FieldCheckbox, Checked: f.tryAXFR},
-	}, []ui.Button{
+		{Key: "newsrc", Label: "New source", Kind: ui.FieldSelect, Value: newSrc, Options: zoneDiffNewSources},
+	}
+	switch newSrc {
+	case zdSrcServer:
+		fields = append(fields, ui.Field{Key: "new", Label: "New server", Kind: ui.FieldText, Value: f.newServer, Placeholder: "new server IP or hostname", CharLimit: 128})
+	case zdSrcFile:
+		fields = append(fields, ui.Field{Key: "newfile", Label: "New zone file", Kind: ui.FieldText, Value: f.newFile, Placeholder: zoneFilePlaceholder, CharLimit: 1024})
+	}
+	fields = append(fields, ui.Field{Key: "oldsrc", Label: "Old source", Kind: ui.FieldSelect, Value: oldSrc, Options: zoneDiffOldSources})
+	switch oldSrc {
+	case zdSrcServer:
+		fields = append(fields, ui.Field{Key: "old", Label: "Old server", Kind: ui.FieldText, Value: f.oldServer, Placeholder: "current server IP or hostname", CharLimit: 128})
+	case zdSrcFile:
+		fields = append(fields, ui.Field{Key: "oldfile", Label: "Old zone file", Kind: ui.FieldText, Value: f.oldFile, Placeholder: zoneFilePlaceholder, CharLimit: 1024})
+	}
+	fields = append(fields,
+		ui.Field{Key: "extra", Label: "Extra names", Kind: ui.FieldText, Value: f.extraNames, Placeholder: "e.g. www, mail, _dmarc", CharLimit: 512},
+		ui.Field{Key: "ttl", Label: "Compare TTLs", Kind: ui.FieldCheckbox, Checked: f.compareTTL},
+		ui.Field{Key: "axfr", Label: "Try AXFR", Kind: ui.FieldCheckbox, Checked: f.tryAXFR},
+	)
+	if oldSrc == zdSrcFile || newSrc == zdSrcFile {
+		fields = append(fields, ui.Field{Key: "probe", Label: "Probe common names", Kind: ui.FieldCheckbox, Checked: f.probe})
+	}
+	return fields
+}
+
+// zoneDiffFormFromValues reads the dialog values into a form; fields not
+// shown keep their values from prev.
+func zoneDiffFormFromValues(v map[string]string, prev zoneDiffForm) zoneDiffForm {
+	f := prev
+	str := func(key string, dst *string) {
+		if x, ok := v[key]; ok {
+			*dst = x
+		}
+	}
+	str("new", &f.newServer)
+	str("old", &f.oldServer)
+	str("newfile", &f.newFile)
+	str("oldfile", &f.oldFile)
+	str("newsrc", &f.newSource)
+	str("oldsrc", &f.oldSource)
+	str("extra", &f.extraNames)
+	if x, ok := v["ttl"]; ok {
+		f.compareTTL = fieldTrue(x)
+	}
+	if x, ok := v["axfr"]; ok {
+		f.tryAXFR = fieldTrue(x)
+	}
+	if x, ok := v["probe"]; ok {
+		f.probe = fieldTrue(x)
+	}
+	return f
+}
+
+// newZoneDiffDialog builds the zone diff dialog.
+func (m *mainModel) newZoneDiffDialog(domain string, f zoneDiffForm) ui.Dialog {
+	d := ui.NewDialog("dl-dlg-zonediff", "Zone diff", zoneDiffDialogFields(domain, f), []ui.Button{
 		{Label: "Run", Action: btnRun, Default: true},
 		{Label: "Cancel", Action: btnCancel},
 	}, ui.ActiveTheme())
-	d.Width = m.dialogWidth(66)
-	d.Help = "Compares the domain's records on its nameservers (or Old server) with New server."
-	cmd := m.openDialog(dlgZoneDiff, tabID, d)
+	d.Width = m.dialogWidth(70)
+	d.Help = "Compares the old side (nameservers, a server or a zone file) with the new side."
+	return d
+}
+
+// openZoneDiffDialog opens the zone diff dialog prefilled with domain and form.
+func (m *mainModel) openZoneDiffDialog(tabID int, domain string, f zoneDiffForm) tea.Cmd {
+	cmd := m.openDialog(dlgZoneDiff, tabID, m.newZoneDiffDialog(domain, f))
 	if domain != "" {
-		m.dialog.FocusField("new")
+		_, newSrc := f.sources()
+		if newSrc == zdSrcFile {
+			m.dialog.FocusField("newfile")
+		} else if newSrc == zdSrcServer {
+			m.dialog.FocusField("new")
+		}
 	}
 	return cmd
+}
+
+// zoneDiffTabForm returns the remembered zone diff form of the dialog's tab.
+func (m mainModel) zoneDiffTabForm() zoneDiffForm {
+	if i := m.tabIndex(m.dlgTab); i >= 0 {
+		return m.tabs[i].zd.form
+	}
+	return newZoneDiffForm()
+}
+
+// syncZoneDiffDialog rebuilds the zone diff dialog when a source select
+// changed which server / zone file fields are needed, keeping the values.
+func (m *mainModel) syncZoneDiffDialog() tea.Cmd {
+	v := m.dialog.Values()
+	f := zoneDiffFormFromValues(v, m.zoneDiffTabForm())
+	want := zoneDiffDialogFields(v["domain"], f)
+	if len(want) == len(m.dialog.Fields) {
+		same := true
+		for i := range want {
+			if want[i].Key != m.dialog.Fields[i].Key {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+	focus := m.dialog.Focused()
+	d := m.newZoneDiffDialog(v["domain"], f)
+	d.Width = m.dialog.Width
+	d.Err = m.dialog.Err
+	if focus != "" {
+		d.FocusField(focus)
+	}
+	m.dialog = d
+	return d.Init()
 }
 
 // openWatchDialog asks for the watch interval of tab t.
@@ -341,6 +457,9 @@ func (m *mainModel) updateDialog(msg tea.Msg) tea.Cmd {
 		if m.dlg == dlgLookup {
 			return tea.Batch(cmd, m.syncLookupDialog())
 		}
+		if m.dlg == dlgZoneDiff {
+			return tea.Batch(cmd, m.syncZoneDiffDialog())
+		}
 		return cmd
 	}
 	if res.Action == ui.ActionCancel || res.Action == "" {
@@ -408,6 +527,9 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 		m.dialog.Err = err.Error()
 		return nil
 	}
+	if cmd, ok := m.submitZoneDialog(m.dlg, res); ok {
+		return cmd
+	}
 	switch m.dlg {
 	case dlgLookup:
 		domain := strings.TrimSpace(v["domain"])
@@ -442,13 +564,7 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 		return cmd
 
 	case dlgZoneDiff:
-		form := zoneDiffForm{
-			newServer:  v["new"],
-			oldServer:  v["old"],
-			extraNames: v["extra"],
-			compareTTL: fieldTrue(v["ttl"]),
-			tryAXFR:    fieldTrue(v["axfr"]),
-		}
+		form := zoneDiffFormFromValues(v, m.zoneDiffTabForm())
 		opts, err := zoneDiffOptions(v["domain"], form)
 		if err != nil {
 			return fail(err)

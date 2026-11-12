@@ -3,13 +3,16 @@ package lookup_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"dlookup/lookup"
+	"dlookup/zonefile"
 
 	"github.com/miekg/dns"
 )
@@ -483,5 +486,363 @@ func TestDiffStatusJSON(t *testing.T) {
 		if got := lookup.DiffStatus(i).String(); got != want {
 			t.Errorf("DiffStatus(%d) = %q", i, got)
 		}
+	}
+}
+
+// zoneFile builds a zone file model from zone-file syntax records (RRSIGs and
+// other records are kept as-is, like a parser would).
+func zoneFile(t *testing.T, origin string, records ...string) *zonefile.Zone {
+	t.Helper()
+	z := &zonefile.Zone{Origin: dns.Fqdn(origin)}
+	for _, r := range records {
+		rr, err := dns.NewRR(r)
+		if err != nil {
+			t.Fatalf("bad test RR %q: %v", r, err)
+		}
+		h := rr.Header()
+		z.Records = append(z.Records, zonefile.Record{
+			Name: strings.ToLower(h.Name),
+			Type: dns.TypeToString[h.Rrtype],
+			TTL:  h.Ttl,
+			Data: strings.TrimSpace(strings.TrimPrefix(rr.String(), h.String())),
+		})
+	}
+	return z
+}
+
+// noNetworkHooks makes discovery and host resolution fail the test.
+func noNetworkHooks(t *testing.T) {
+	t.Helper()
+	restore := lookup.SetZoneDiffHooks(nil, func(ctx context.Context, host string) ([]string, error) {
+		t.Errorf("unexpected host resolution of %s", host)
+		return nil, errors.New("no network")
+	}, "53")
+	t.Cleanup(restore)
+}
+
+func TestDiffZoneFileVsServer(t *testing.T) {
+	newAddr, _ := startZoneServer(t, "example.com", false, newZone...)
+	old := zoneFile(t, "example.com", oldZone...)
+
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: old, OldZoneLabel: "old.zone", NewServer: newAddr, TryAXFR: true})
+	if res.Enumeration != "file (14 records)" {
+		t.Errorf("Enumeration = %q", res.Enumeration)
+	}
+	if len(res.OldServers) != 0 || res.OldFile != "old.zone" || res.NewServer != newAddr {
+		t.Errorf("sources: old=%v file=%q new=%q", res.OldServers, res.OldFile, res.NewServer)
+	}
+	recs := recordMap(res)
+	expectStatus(t, recs, "example.com. A", lookup.DiffMatch)
+	expectStatus(t, recs, "example.com. SOA", lookup.DiffMatch)
+	expectStatus(t, recs, "example.com. TXT", lookup.DiffMatch)
+	expectStatus(t, recs, "example.com. MX", lookup.DiffMatch)
+	expectStatus(t, recs, "www.example.com. CNAME", lookup.DiffMatch)
+	expectStatus(t, recs, "secret.example.com. A", lookup.DiffMatch) // in the file, not guessable
+	expectStatus(t, recs, "backend.example.com. A", lookup.DiffMatch)
+	expectStatus(t, recs, "shop.example.com. A", lookup.DiffMissing)
+	expectStatus(t, recs, "blog.example.com. A", lookup.DiffChanged)
+	ns := expectStatus(t, recs, "example.com. NS", lookup.DiffChanged)
+	if !ns.Expected {
+		t.Errorf("apex NS not expected: %+v", ns)
+	}
+	if _, ok := recs["api.example.com. A"]; ok {
+		t.Error("api.example.com found without --probe")
+	}
+	for k := range recs {
+		if strings.Contains(k, "RRSIG") || strings.HasPrefix(k, "www.example.com. A") {
+			t.Errorf("unexpected %s", k)
+		}
+	}
+	out := lookup.FormatZoneDiff(res, false)
+	if !strings.Contains(out, "old: zone file old.zone") || !strings.Contains(out, "new: "+newAddr) {
+		t.Errorf("header:\n%s", out)
+	}
+
+	// With Probe the common names are checked too.
+	res = runDiff(t, lookup.ZoneDiffOptions{OldZone: old, NewServer: newAddr, Probe: true})
+	if !strings.HasPrefix(res.Enumeration, "file (14 records) + probe (") {
+		t.Errorf("Enumeration = %q", res.Enumeration)
+	}
+	expectStatus(t, recordMap(res), "api.example.com. A", lookup.DiffExtra)
+
+	// AXFR from the new server finds its extra names.
+	axfrAddr, _ := startZoneServer(t, "example.com", true, newZone...)
+	res = runDiff(t, lookup.ZoneDiffOptions{OldZone: old, NewServer: axfrAddr, TryAXFR: true})
+	if res.Enumeration != "file (14 records) + axfr from new" {
+		t.Errorf("Enumeration = %q", res.Enumeration)
+	}
+	expectStatus(t, recordMap(res), "api.example.com. A", lookup.DiffExtra)
+}
+
+func TestDiffZoneServerVsFile(t *testing.T) {
+	oldAddr, _ := startZoneServer(t, "example.com", false, oldZone...)
+	res := runDiff(t, lookup.ZoneDiffOptions{OldServer: oldAddr, NewZone: zoneFile(t, "example.com", newZone...), NewZoneLabel: "cf.json", Probe: true})
+	if !strings.HasPrefix(res.Enumeration, "file (13 records) + probe (") || res.NewFile != "cf.json" || res.NewServer != "" {
+		t.Errorf("Enumeration=%q NewFile=%q NewServer=%q", res.Enumeration, res.NewFile, res.NewServer)
+	}
+	recs := recordMap(res)
+	expectStatus(t, recs, "api.example.com. A", lookup.DiffExtra)
+	expectStatus(t, recs, "shop.example.com. A", lookup.DiffMissing) // found by the probe
+	expectStatus(t, recs, "blog.example.com. A", lookup.DiffChanged)
+	expectStatus(t, recs, "example.com. TXT", lookup.DiffMatch)
+	expectStatus(t, recs, "secret.example.com. A", lookup.DiffMatch)
+}
+
+func TestDiffZoneFileVsFileOffline(t *testing.T) {
+	noNetworkHooks(t)
+	old := zoneFile(t, "example.com", oldZone...)
+	nz := zoneFile(t, "example.com", append(newZone, "*.example.com. 300 IN A 192.0.2.99")...)
+	res := runDiff(t, lookup.ZoneDiffOptions{Domain: "", OldZone: old, NewZone: nz, TryAXFR: true, CompareTTL: true})
+	if res.Domain != "example.com." || res.Enumeration != "old file (14 records) + new file (14 records)" {
+		t.Errorf("Domain=%q Enumeration=%q", res.Domain, res.Enumeration)
+	}
+	if len(res.OldServers) != 0 || res.NewServer != "" {
+		t.Errorf("servers: %v %q", res.OldServers, res.NewServer)
+	}
+	recs := recordMap(res)
+	a := expectStatus(t, recs, "example.com. A", lookup.DiffChanged) // TTL 300 vs 3600
+	if a.Old[0] != "192.0.2.1 ttl=300" {
+		t.Errorf("TTL: %+v", a)
+	}
+	expectStatus(t, recs, "secret.example.com. A", lookup.DiffMatch)
+	expectStatus(t, recs, "api.example.com. A", lookup.DiffExtra)
+	// shop is covered by the new zone's wildcard.
+	shop := expectStatus(t, recs, "shop.example.com. A", lookup.DiffChanged)
+	if len(shop.New) != 1 || shop.New[0] != "192.0.2.99 ttl=300" {
+		t.Errorf("wildcard synthesis: %+v", shop)
+	}
+	expectStatus(t, recs, "*.example.com. A", lookup.DiffExtra)
+	expectStatus(t, recs, "example.com. SOA", lookup.DiffMatch) // serial ignored
+
+	// Origin mismatch and conflicting options are errors.
+	ctx := context.Background()
+	for i, opts := range []lookup.ZoneDiffOptions{
+		{Domain: "example.org", OldZone: old, NewZone: nz},
+		{OldZone: old, OldServer: "192.0.2.1", NewZone: nz},
+		{OldZone: old, NewZone: nz, NewServer: "192.0.2.1"},
+		{Domain: "", OldZone: &zonefile.Zone{}, NewZone: &zonefile.Zone{}},
+	} {
+		if _, err := lookup.DiffZone(ctx, opts); err == nil {
+			t.Errorf("case %d: expected error", i)
+		}
+	}
+}
+
+func TestDiffZoneFileVsLiveAuthoritative(t *testing.T) {
+	liveAddr, _ := startZoneServer(t, "example.com", false, newZone...)
+	_, port, _ := net.SplitHostPort(liveAddr)
+	restore := lookup.SetZoneDiffHooks([]string{liveAddr}, func(ctx context.Context, host string) ([]string, error) {
+		if host != "ns1.newprov.net" {
+			t.Errorf("resolved %s", host)
+		}
+		return []string{"127.0.0.1"}, nil
+	}, port)
+	defer restore()
+
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: zoneFile(t, "example.com", oldZone...)})
+	if res.NewServer != "127.0.0.1:"+port || len(res.NewServers) != 1 || len(res.OldServers) != 0 {
+		t.Errorf("NewServer=%q NewServers=%v OldServers=%v", res.NewServer, res.NewServers, res.OldServers)
+	}
+	recs := recordMap(res)
+	expectStatus(t, recs, "shop.example.com. A", lookup.DiffMissing)
+	expectStatus(t, recs, "secret.example.com. A", lookup.DiffMatch)
+	if !strings.Contains(lookup.FormatZoneDiff(res, false), "(live authoritative)") {
+		t.Error("live authoritative not shown")
+	}
+}
+
+func TestDiffZoneFileWithoutSOAAndNS(t *testing.T) {
+	liveAddr, _ := startZoneServer(t, "example.com", false, newZone...)
+	// An OctoDNS-style export: no SOA, no apex NS.
+	var recs []string
+	for _, r := range newZone {
+		if !strings.Contains(r, " SOA ") && !strings.Contains(r, " NS ") {
+			recs = append(recs, r)
+		}
+	}
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: zoneFile(t, "example.com", recs...), NewServer: liveAddr})
+	m := recordMap(res)
+	for _, k := range []string{"example.com. SOA", "example.com. NS"} {
+		r := expectStatus(t, m, k, lookup.DiffExtra)
+		if !r.Expected || !strings.Contains(r.Note, "not in the zone file") {
+			t.Errorf("%s: %+v", k, r)
+		}
+	}
+	if res.HasDifferences() {
+		t.Errorf("unexpected differences:\n%s", lookup.FormatZoneDiff(res, false))
+	}
+}
+
+func TestDiffZoneFileGlueNotCompared(t *testing.T) {
+	zone := []string{
+		"example.com. 300 IN SOA ns1.example.com. h.example.com. 1 7200 3600 1209600 300",
+		"example.com. 300 IN NS ns1.example.com.",
+		"ns1.example.com. 300 IN A 192.0.2.53",
+		"sub.example.com. 300 IN NS ns.sub.example.com.",
+	}
+	liveAddr, _ := startZoneServer(t, "example.com", false, zone...)
+	file := zoneFile(t, "example.com", append(zone, "ns.sub.example.com. 300 IN A 192.0.2.54")...)
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: file, NewServer: liveAddr})
+	m := recordMap(res)
+	expectStatus(t, m, "sub.example.com. NS", lookup.DiffMatch)
+	if _, ok := m["ns.sub.example.com. A"]; ok {
+		t.Error("glue below a delegation was compared")
+	}
+}
+
+func TestDiffZoneAlias(t *testing.T) {
+	zone := []string{
+		"example.com. 300 IN SOA ns1.example.com. h.example.com. 1 7200 3600 1209600 300",
+		"example.com. 300 IN NS ns1.example.com.",
+		"ns1.example.com. 300 IN A 192.0.2.53",
+		"lb.example.com. 300 IN A 192.0.2.80",
+		"www.example.com. 300 IN A 192.0.2.80",    // flattened ALIAS to lb
+		"example.com. 60 IN A 198.51.100.7",       // flattened ALIAS to the ELB
+		"app.example.com. 300 IN A 198.51.100.99", // ALIAS target resolves elsewhere
+		"cdn.example.com. 300 IN AAAA 2001:db8::1",
+	}
+	liveAddr, _ := startZoneServer(t, "example.com", false, zone...)
+	elbAddr, _ := startZoneServer(t, "elb.test", false,
+		"elb.test. 300 IN SOA ns.elb.test. h.elb.test. 1 7200 3600 1209600 300",
+		"lb-1.elb.test. 60 IN A 198.51.100.7",
+		"lb-2.elb.test. 60 IN A 198.51.100.8",
+	)
+	restore := lookup.SetZoneDiffHooks([]string{liveAddr, elbAddr}, nil, "53")
+	defer restore()
+
+	file := zoneFile(t, "example.com", zone[:4]...)
+	file.Records = append(file.Records,
+		zonefile.Record{Name: "www.example.com.", Type: zonefile.AliasType, Data: "lb.example.com."},
+		zonefile.Record{Name: "example.com.", Type: zonefile.AliasType, Data: "lb-1.elb.test.", Comment: "route53: alias-type=A alias-zone=Z2 evaluate-target-health=false"},
+		zonefile.Record{Name: "app.example.com.", Type: zonefile.AliasType, Data: "lb-2.elb.test.", Comment: "route53: alias-type=A"},
+	)
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: file, NewServer: liveAddr, CompareTTL: true})
+	m := recordMap(res)
+	www := expectStatus(t, m, "www.example.com. A", lookup.DiffMatch)
+	if !strings.Contains(www.Note, "ALIAS record") {
+		t.Errorf("www note = %q", www.Note)
+	}
+	apex := expectStatus(t, m, "example.com. A", lookup.DiffMatch) // TTL not compared for ALIAS
+	if !strings.Contains(apex.Note, "lb-1.elb.test.") {
+		t.Errorf("apex note = %q", apex.Note)
+	}
+	app := expectStatus(t, m, "app.example.com. A", lookup.DiffChanged)
+	if len(app.Old) != 1 || app.Old[0] != "198.51.100.8" {
+		t.Errorf("app = %+v", app)
+	}
+	if _, ok := m["example.com. AAAA"]; ok {
+		t.Error("alias-type=A alias compared as AAAA")
+	}
+
+	// Offline: both files have the same ALIAS -> match on the target.
+	noNetworkHooks(t)
+	res = runDiff(t, lookup.ZoneDiffOptions{OldZone: file, NewZone: file})
+	if res.HasDifferences() {
+		t.Errorf("identical files differ:\n%s", lookup.FormatZoneDiff(res, true))
+	}
+	apex = expectStatus(t, recordMap(res), "example.com. A", lookup.DiffMatch)
+	if apex.Old[0] != "ALIAS lb-1.elb.test." || !strings.Contains(apex.Note, "not resolved (offline diff)") {
+		t.Errorf("offline alias = %+v", apex)
+	}
+}
+
+func TestDiffZoneCloudflareProxied(t *testing.T) {
+	live := []string{
+		"example.com. 300 IN SOA ns1.example.com. h.example.com. 1 7200 3600 1209600 300",
+		"example.com. 300 IN NS ns1.example.com.",
+		"ns1.example.com. 300 IN A 192.0.2.53",
+		"www.example.com. 300 IN A 104.16.1.1", // proxied origin 203.0.113.5
+		"www.example.com. 300 IN AAAA 2606:4700::1",
+		"shop.example.com. 300 IN A 104.16.2.2", // proxied CNAME, flattened
+		"api.example.com. 300 IN A 104.16.3.3",  // NOT proxied in the file
+	}
+	liveAddr, _ := startZoneServer(t, "example.com", false, live...)
+	yes, no := true, false
+	file := zoneFile(t, "example.com", live[:3]...)
+	file.Records = append(file.Records,
+		zonefile.Record{Name: "www.example.com.", Type: "A", TTL: 1, Data: "203.0.113.5", Proxied: &yes},
+		zonefile.Record{Name: "shop.example.com.", Type: "CNAME", TTL: 1, Data: "shops.myshopify.test.", Proxied: &yes},
+		zonefile.Record{Name: "api.example.com.", Type: "A", TTL: 1, Data: "203.0.113.6", Proxied: &no},
+	)
+	res := runDiff(t, lookup.ZoneDiffOptions{OldZone: file, NewServer: liveAddr})
+	m := recordMap(res)
+	for _, c := range []struct {
+		key string
+		st  lookup.DiffStatus
+	}{
+		{"www.example.com. A", lookup.DiffChanged},
+		{"www.example.com. AAAA", lookup.DiffExtra},
+		{"shop.example.com. CNAME", lookup.DiffMissing},
+		{"shop.example.com. A", lookup.DiffExtra},
+	} {
+		r := expectStatus(t, m, c.key, c.st)
+		if !r.Expected || !strings.Contains(r.Note, "proxied by Cloudflare") {
+			t.Errorf("%s: %+v", c.key, r)
+		}
+	}
+	api := expectStatus(t, m, "api.example.com. A", lookup.DiffChanged)
+	if api.Expected {
+		t.Error("unproxied record marked expected")
+	}
+	if !res.HasDifferences() {
+		t.Error("api change should count")
+	}
+}
+
+func TestDumpZone(t *testing.T) {
+	addr, _ := startZoneServer(t, "example.com", true, oldZone...)
+	ctx := context.Background()
+	z, method, err := lookup.DumpZone(ctx, lookup.ZoneDumpOptions{Domain: "example.com", Server: addr, TryAXFR: true, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "axfr from "+addr {
+		t.Errorf("method = %q", method)
+	}
+	if z.Origin != "example.com." || len(z.Lookup("secret.example.com.", "A")) != 1 || len(z.Lookup("example.com.", "SOA")) != 1 {
+		t.Errorf("zone = %+v", z)
+	}
+	for _, r := range z.Records {
+		if r.Type == "RRSIG" {
+			t.Error("RRSIG dumped")
+		}
+	}
+	if len(z.Records) != 14 {
+		t.Errorf("%d records, want 14", len(z.Records))
+	}
+
+	// AXFR refused: probe, with discovery of the authoritative servers.
+	refused, _ := startZoneServer(t, "example.com", false, append(oldZone, "*.example.com. 300 IN TXT \"wild\"")...)
+	_, port, _ := net.SplitHostPort(refused)
+	restore := lookup.SetZoneDiffHooks([]string{refused}, func(ctx context.Context, host string) ([]string, error) {
+		return []string{"127.0.0.1"}, nil
+	}, port)
+	defer restore()
+	var calls atomic.Int32
+	z, method, err = lookup.DumpZone(ctx, lookup.ZoneDumpOptions{
+		Domain: "example.com", TryAXFR: true, Timeout: 2 * time.Second, ExtraNames: []string{"secret"},
+		Progress: func(done, total int) { calls.Add(1) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(method, "probe (") || calls.Load() == 0 {
+		t.Errorf("method = %q, progress calls %d", method, calls.Load())
+	}
+	for _, want := range [][2]string{
+		{"example.com.", "SOA"}, {"example.com.", "MX"}, {"www.example.com.", "CNAME"},
+		{"backend.example.com.", "A"}, {"secret.example.com.", "A"}, {"shop.example.com.", "A"},
+		{"_dmarc.example.com.", "TXT"}, {"*.example.com.", "TXT"},
+	} {
+		if len(z.Lookup(want[0], want[1])) == 0 {
+			t.Errorf("missing %s %s in dump", want[0], want[1])
+		}
+	}
+	if len(z.Lookup("ftp.example.com.", "TXT")) != 0 || len(z.Lookup("www.example.com.", "A")) != 0 {
+		t.Error("wildcard-synthesized or CNAME-chain records dumped")
+	}
+
+	if _, _, err := lookup.DumpZone(ctx, lookup.ZoneDumpOptions{Domain: "192.0.2.1"}); err == nil {
+		t.Error("IP domain: expected error")
 	}
 }

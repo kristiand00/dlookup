@@ -358,6 +358,9 @@ func (m *mainModel) do(action string) tea.Cmd {
 	lookupTab := t != nil && !t.isHome()
 	results := lookupTab && t.resultsVisible()
 
+	if isZoneAction(action) {
+		return m.handleZoneAction(action)
+	}
 	if strings.HasPrefix(action, "filter:") {
 		if results && t.isZoneDiff() && t.state == stateViewResults {
 			t.setZoneDiffFilter(strings.TrimPrefix(action, "filter:"))

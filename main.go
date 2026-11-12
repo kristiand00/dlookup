@@ -38,8 +38,8 @@ func main() {
 
 // run executes dlookup and returns the process exit code:
 // 0 success, 1 a lookup (or the TUI) failed, 2 usage error.
-// "dlookup zonediff ..." and "dlookup sdig ..." have their own exit codes
-// (see runZoneDiff and runSDIG).
+// "dlookup zonediff ...", "dlookup sdig ..." and "dlookup zone ..." have their
+// own exit codes (see runZoneDiff, runSDIG and runZone).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -47,6 +47,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runZoneDiff(args[1:], stdin, stdout, stderr)
 		case "sdig":
 			return runSDIG(args[1:], stdin, stdout, stderr)
+		case "zone":
+			return runZone(args[1:], stdin, stdout, stderr)
 		}
 	}
 	cli, err := parseArgs(args, stdin, stderr)

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"dlookup/zonefile"
 )
 
 // Zone diff: compare the records served by two DNS servers for one domain,
@@ -51,6 +53,20 @@ import (
 // The SOA serial is always ignored; SOA mname/rname and apex NS differences
 // are reported as changed with an explanatory Note, since they usually differ
 // between providers.
+//
+// Zone files. Either side can be a parsed zone file (ZoneDiffOptions.OldZone /
+// NewZone) instead of a server: that side's answers come from the file, and
+// every name and type in the file is checked (plus ExtraNames, plus the probe
+// list when Probe is set; AXFR is still tried against server sides). With an
+// old zone file and neither NewServer nor NewZone, the file is compared with
+// the domain's live authoritative nameservers. Names below a delegation in a
+// file (glue) are not compared. Route 53 ALIAS records (type ALIAS or ANAME)
+// are compared by the addresses their target resolves to (in-zone targets
+// from the file, others via the system resolvers; unresolvable targets are
+// shown as "ALIAS <target>"). Cloudflare proxied records differ from live
+// answers served by Cloudflare (anycast addresses, flattened CNAMEs); such
+// differences are marked Expected. A file without SOA or apex NS records
+// (common in provider exports) does not make those differences count.
 
 // DiffStatus classifies one (name, type) comparison.
 type DiffStatus int
@@ -102,6 +118,18 @@ type ZoneDiffOptions struct {
 	Timeout     time.Duration         // per query; 0 = DefaultTimeout
 	Concurrency int                   // 0 = 8
 	Progress    func(done, total int) // optional, may be called from goroutines
+
+	// OldZone, when set, replaces the old servers: old answers come from the
+	// file (OldServer must be empty). With NewServer empty and NewZone nil the
+	// new side is the domain's live authoritative nameservers.
+	OldZone *zonefile.Zone
+	// NewZone, when set, replaces the new server (NewServer must be empty).
+	NewZone *zonefile.Zone
+	// OldZoneLabel / NewZoneLabel name the files in results (e.g. the path).
+	OldZoneLabel, NewZoneLabel string
+	// Probe also checks the common-name probe list when a zone file is used
+	// (without files, probing is the fallback when AXFR is unavailable).
+	Probe bool
 }
 
 // DefaultZoneDiffTypes are the record types compared when ZoneDiffOptions.Types is nil.
@@ -126,12 +154,22 @@ type RecordDiff struct {
 
 // ZoneDiffResult is the outcome of DiffZone.
 type ZoneDiffResult struct {
-	Domain      string             `json:"domain"`
-	OldServers  []string           `json:"old_servers"` // actually queried
-	NewServer   string             `json:"new_server"`  // resolved addr:port
-	Enumeration string             `json:"enumeration"` // "axfr from old", "axfr from new", "axfr from old and new" or "probe (N names)"
-	Records     []RecordDiff       `json:"records"`     // sorted by name then type
+	Domain     string   `json:"domain"`
+	OldServers []string `json:"old_servers"` // actually queried; empty for a zone file
+	NewServer  string   `json:"new_server"`  // resolved addr:port; empty for a zone file
+	// NewServers lists all new servers when they were discovered (the domain's
+	// live authoritative nameservers); NewServer is the first working one.
+	NewServers []string `json:"new_servers,omitempty"`
+	OldFile    string   `json:"old_file,omitempty"` // label of the old zone file, if any
+	NewFile    string   `json:"new_file,omitempty"` // label of the new zone file, if any
+	// Enumeration: "axfr from old", "axfr from new", "axfr from old and new"
+	// or "probe (N names)"; with zone files e.g. "file (N records)",
+	// "old file (N records) + new file (M records)", "file (N records) + axfr
+	// from new + probe (K names)".
+	Enumeration string             `json:"enumeration"`
+	Records     []RecordDiff       `json:"records"` // sorted by name then type
 	Counts      map[DiffStatus]int `json:"counts"`
+	Warnings    []string           `json:"warnings,omitempty"` // e.g. unparseable zone file records
 }
 
 // HasDifferences reports whether any record is changed, missing, extra or
@@ -183,34 +221,65 @@ var noiseTypes = map[uint16]bool{
 	dns.TypeOPT: true, dns.TypeTSIG: true, dns.TypeAXFR: true, dns.TypeIXFR: true,
 }
 
+// zoneSide is one side of a diff: DNS servers or a zone file.
+type zoneSide struct {
+	servers    []string // resolved addr:port, when not a file
+	file       *fileZone
+	discovered bool // servers are the domain's authoritative nameservers
+}
+
 type zoneDiffer struct {
 	opts       ZoneDiffOptions
 	zone       string // FQDN, lowercase
 	types      []uint16
-	allowFound bool // add types found via AXFR
+	allowFound bool // add types found via AXFR / zone files
 	timeout    time.Duration
-	oldServers []string
-	newServer  string
-	axfrTypes  map[string]map[uint16]bool // name -> types found in transfer
+	old, new   *zoneSide
+	foundTypes map[string]map[uint16]bool // name -> types found in transfers and files
 	wildcard   string                     // random probe name, reported as "*.<zone>"
+	maxNames   int
 }
 
-// DiffZone compares the records for opts.Domain served by the old and new servers.
+// online reports whether any side is a DNS server (so ALIAS targets outside
+// the zone may be resolved).
+func (d *zoneDiffer) online() bool {
+	return (d.old != nil && d.old.file == nil) || (d.new != nil && d.new.file == nil)
+}
+
+// DiffZone compares the records for opts.Domain served by the old and new
+// servers (or held in the old/new zone files).
 // It returns an error only for invalid options or when a server cannot be
 // reached at all; per-record failures are reported as DiffError records.
 func DiffZone(ctx context.Context, opts ZoneDiffOptions) (*ZoneDiffResult, error) {
-	domain, err := NormalizeTarget(opts.Domain)
+	rawDomain := opts.Domain
+	if strings.TrimSpace(rawDomain) == "" {
+		for _, z := range []*zonefile.Zone{opts.OldZone, opts.NewZone} {
+			if z != nil && strings.TrimSpace(z.Origin) != "" {
+				rawDomain = z.Origin
+				break
+			}
+		}
+	}
+	domain, err := NormalizeTarget(rawDomain)
 	if err != nil {
 		return nil, err
 	}
 	if net.ParseIP(domain) != nil {
 		return nil, fmt.Errorf("invalid domain %q: an IP address is not a zone", opts.Domain)
 	}
-	if strings.TrimSpace(opts.NewServer) == "" {
+	if opts.OldZone != nil && strings.TrimSpace(opts.OldServer) != "" {
+		return nil, errors.New("old server and old zone file are mutually exclusive")
+	}
+	if opts.NewZone != nil && strings.TrimSpace(opts.NewServer) != "" {
+		return nil, errors.New("new server and new zone file are mutually exclusive")
+	}
+	if opts.NewZone == nil && opts.OldZone == nil && strings.TrimSpace(opts.NewServer) == "" {
 		return nil, errors.New("new server is required")
 	}
-	if err := ValidateServer(opts.NewServer); err != nil {
-		return nil, err
+	if opts.NewServer != "" {
+		if err := ValidateServer(opts.NewServer); err != nil {
+			return nil, err
+		}
 	}
 	if opts.OldServer != "" {
 		if err := ValidateServer(opts.OldServer); err != nil {
@@ -224,12 +293,42 @@ func DiffZone(ctx context.Context, opts ZoneDiffOptions) (*ZoneDiffResult, error
 		types:      opts.Types,
 		allowFound: opts.Types == nil,
 		timeout:    opts.Timeout,
+		old:        &zoneSide{},
+		new:        &zoneSide{},
 	}
 	if d.types == nil {
 		d.types = DefaultZoneDiffTypes
 	}
 	if d.timeout <= 0 {
 		d.timeout = DefaultTimeout
+	}
+
+	res := &ZoneDiffResult{Domain: d.zone, Counts: map[DiffStatus]int{}}
+	for _, f := range []struct {
+		z     *zonefile.Zone
+		side  *zoneSide
+		label string
+		which string
+		dst   *string
+	}{
+		{opts.OldZone, d.old, opts.OldZoneLabel, "old", &res.OldFile},
+		{opts.NewZone, d.new, opts.NewZoneLabel, "new", &res.NewFile},
+	} {
+		if f.z == nil {
+			continue
+		}
+		fz, warnings, err := newFileZone(f.z, d.zone)
+		if err != nil {
+			return nil, fmt.Errorf("%s zone file: %w", f.which, err)
+		}
+		for _, w := range warnings {
+			res.Warnings = append(res.Warnings, f.which+" zone file: "+w)
+		}
+		f.side.file = fz
+		*f.dst = f.label
+		if *f.dst == "" {
+			*f.dst = "zone file"
+		}
 	}
 
 	extra := make([]string, 0, len(opts.ExtraNames))
@@ -241,71 +340,70 @@ func DiffZone(ctx context.Context, opts ZoneDiffOptions) (*ZoneDiffResult, error
 		extra = append(extra, q)
 	}
 
-	if d.newServer, err = resolveServer(ctx, opts.NewServer); err != nil {
-		return nil, fmt.Errorf("new server: %w", err)
-	}
-	if opts.OldServer != "" {
-		s, err := resolveServer(ctx, opts.OldServer)
-		if err != nil {
-			return nil, fmt.Errorf("old server: %w", err)
-		}
-		d.oldServers = []string{s}
-	} else if d.oldServers, err = d.discoverOldServers(ctx); err != nil {
-		return nil, err
-	}
-
-	// Reachability check; also moves the first working old server to the front.
-	used, err := d.checkServer(ctx, d.oldServers)
-	if err != nil {
-		return nil, fmt.Errorf("old server %s: %w", strings.Join(d.oldServers, ", "), err)
-	}
-	d.oldServers = moveToFront(d.oldServers, used)
-	if _, err := d.checkServer(ctx, []string{d.newServer}); err != nil {
-		return nil, fmt.Errorf("new server %s: %w", d.newServer, err)
-	}
-
-	res := &ZoneDiffResult{
-		Domain:     d.zone,
-		OldServers: append([]string(nil), d.oldServers...),
-		NewServer:  d.newServer,
-		Counts:     map[DiffStatus]int{},
-	}
-
-	var names []string
-	if opts.TryAXFR {
-		var from []string
-		d.axfrTypes = map[string]map[uint16]bool{}
-		if found, err := axfrTransfer(ctx, d.oldServers, d.zone, d.timeout); err == nil {
-			from = append(from, "old")
-			mergeTypes(d.axfrTypes, found)
-		}
-		if found, err := axfrTransfer(ctx, []string{d.newServer}, d.zone, d.timeout); err == nil {
-			from = append(from, "new")
-			mergeTypes(d.axfrTypes, found)
-		}
-		if len(from) > 0 {
-			res.Enumeration = "axfr from " + strings.Join(from, " and ")
-			names = append(names, d.zone)
-			for n := range d.axfrTypes {
-				names = append(names, n)
+	if d.new.file == nil {
+		if opts.NewServer != "" {
+			s, err := resolveServer(ctx, opts.NewServer)
+			if err != nil {
+				return nil, fmt.Errorf("new server: %w", err)
 			}
-			sort.Strings(names)
+			d.new.servers = []string{s}
 		} else {
-			d.axfrTypes = nil
+			// Old zone file vs the live zone.
+			if d.new.servers, err = d.discoverServers(ctx); err != nil {
+				return nil, err
+			}
+			d.new.discovered = true
 		}
 	}
-	if d.axfrTypes == nil {
-		names = d.probeNames()
+	if d.old.file == nil {
+		if opts.OldServer != "" {
+			s, err := resolveServer(ctx, opts.OldServer)
+			if err != nil {
+				return nil, fmt.Errorf("old server: %w", err)
+			}
+			d.old.servers = []string{s}
+		} else {
+			if d.old.servers, err = d.discoverServers(ctx); err != nil {
+				return nil, err
+			}
+			d.old.discovered = true
+		}
 	}
-	names = append(names, extra...)
 
-	diffs, total, err := d.run(ctx, names)
+	// Reachability check; also moves the first working server to the front.
+	for _, s := range []struct {
+		side  *zoneSide
+		which string
+	}{{d.old, "old"}, {d.new, "new"}} {
+		if s.side.file != nil {
+			continue
+		}
+		used, err := d.checkServer(ctx, s.side.servers)
+		if err != nil {
+			return nil, fmt.Errorf("%s server %s: %w", s.which, strings.Join(s.side.servers, ", "), err)
+		}
+		s.side.servers = moveToFront(s.side.servers, used)
+	}
+
+	if d.old.file == nil {
+		res.OldServers = append([]string(nil), d.old.servers...)
+	}
+	if d.new.file == nil {
+		res.NewServer = d.new.servers[0]
+		if d.new.discovered {
+			res.NewServers = append([]string(nil), d.new.servers...)
+		}
+	}
+
+	names, enumeration, probing := d.enumerate(ctx, extra)
+	diffs, total, err := d.diffAll(ctx, names)
 	if err != nil {
 		return nil, err
 	}
-	if res.Enumeration == "" {
-		res.Enumeration = fmt.Sprintf("probe (%d names)", total)
+	if probing && enumeration == "" {
+		enumeration = fmt.Sprintf("probe (%d names)", total)
 	}
+	res.Enumeration = enumeration
 	sortRecordDiffs(diffs)
 	res.Records = diffs
 	for _, s := range AllDiffStatuses {
@@ -315,6 +413,109 @@ func DiffZone(ctx context.Context, opts ZoneDiffOptions) (*ZoneDiffResult, error
 		res.Counts[r.Status]++
 	}
 	return res, nil
+}
+
+// enumerate returns the names to check and a description of how they were
+// found. probing is true when only the probe list (and no file or transfer)
+// was used; the caller then reports the total number of names checked.
+func (d *zoneDiffer) enumerate(ctx context.Context, extra []string) (names []string, enumeration string, probing bool) {
+	d.foundTypes = map[string]map[uint16]bool{}
+	set := map[string]bool{}
+	var parts []string
+
+	files := 0
+	for _, s := range []*zoneSide{d.old, d.new} {
+		if s.file != nil {
+			files++
+		}
+	}
+	for _, s := range []struct {
+		side  *zoneSide
+		which string
+	}{{d.old, "old "}, {d.new, "new "}} {
+		f := s.side.file
+		if f == nil {
+			continue
+		}
+		label := "file"
+		if files == 2 {
+			label = s.which + "file"
+		}
+		parts = append(parts, fmt.Sprintf("%s (%d records)", label, f.count))
+		mergeTypes(d.foundTypes, f.types)
+		for n := range f.types {
+			set[n] = true
+		}
+	}
+
+	if d.opts.TryAXFR {
+		var from []string
+		for _, s := range []struct {
+			side  *zoneSide
+			which string
+		}{{d.old, "old"}, {d.new, "new"}} {
+			if s.side.file != nil {
+				continue
+			}
+			if found, err := axfrTransfer(ctx, s.side.servers, d.zone, d.timeout); err == nil {
+				from = append(from, s.which)
+				mergeTypes(d.foundTypes, found)
+				for n := range found {
+					set[n] = true
+				}
+			}
+		}
+		if len(from) > 0 {
+			parts = append(parts, "axfr from "+strings.Join(from, " and "))
+			set[d.zone] = true
+		}
+	}
+
+	names = make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	switch {
+	case len(parts) == 0:
+		// Neither a file nor a transfer: probe.
+		names = d.probeNames()
+		probing = true
+	case files > 0 && d.opts.Probe:
+		probe := d.probeNames()
+		if set["*."+d.zone] {
+			// The file lists the wildcard itself; don't report it twice.
+			probe = probe[:len(probe)-1]
+			d.wildcard = ""
+		}
+		parts = append(parts, fmt.Sprintf("probe (%d names)", len(probe)))
+		names = append(names, probe...)
+	}
+	if !probing {
+		enumeration = strings.Join(parts, " + ")
+	}
+	d.maxNames = maxZoneDiffNames + len(names)
+	return append(names, extra...), enumeration, probing
+}
+
+// diffAll diffs every name (and in-zone names discovered in answers).
+func (d *zoneDiffer) diffAll(ctx context.Context, names []string) ([]RecordDiff, int, error) {
+	var (
+		mu    sync.Mutex
+		diffs []RecordDiff
+	)
+	total, err := d.run(ctx, names, func(ctx context.Context, name string) []string {
+		rd, more := d.diffName(ctx, name)
+		mu.Lock()
+		diffs = append(diffs, rd...)
+		mu.Unlock()
+		return more
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return diffs, total, nil
 }
 
 func mergeTypes(dst, src map[string]map[uint16]bool) {
@@ -406,10 +607,10 @@ func preferIPv4(ips []string) []string {
 	return append(v4, v6...)
 }
 
-// discoverOldServers finds the authoritative nameservers of the zone
+// discoverServers finds the authoritative nameservers of the zone
 // containing d.zone (walking up via SOA if d.zone itself has no NS) and
 // returns their addresses, IPv4 first.
-func (d *zoneDiffer) discoverOldServers(ctx context.Context) ([]string, error) {
+func (d *zoneDiffer) discoverServers(ctx context.Context) ([]string, error) {
 	resolvers := zoneDiscoveryServers()
 	resp, _, err := queryServers(ctx, resolvers, d.zone, dns.TypeNS, d.timeout)
 	if err != nil {
@@ -547,21 +748,44 @@ func queryServers(ctx context.Context, servers []string, name string, qtype uint
 // axfrTransfer attempts a zone transfer from each server in turn and returns
 // the owner names (inside zone) and their record types.
 func axfrTransfer(ctx context.Context, servers []string, zone string, timeout time.Duration) (map[string]map[uint16]bool, error) {
+	rrs, _, err := axfrRecords(ctx, servers, zone, timeout)
+	if err != nil {
+		return nil, err
+	}
+	found := map[string]map[uint16]bool{}
+	for _, rr := range rrs {
+		h := rr.Header()
+		name := strings.ToLower(h.Name)
+		if found[name] == nil {
+			found[name] = map[uint16]bool{}
+		}
+		found[name][h.Rrtype] = true
+	}
+	return found, nil
+}
+
+// axfrRecords attempts a zone transfer from each server in turn and returns
+// the in-zone records (without DNSSEC/transfer noise types; the SOA once) and
+// the server that answered.
+func axfrRecords(ctx context.Context, servers []string, zone string, timeout time.Duration) ([]dns.RR, string, error) {
 	var lastErr error
 	for _, server := range servers {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		found, err := axfrOne(ctx, server, zone, timeout)
+		rrs, err := axfrOne(ctx, server, zone, timeout)
 		if err == nil {
-			return found, nil
+			return rrs, server, nil
 		}
 		lastErr = err
 	}
-	return nil, lastErr
+	if lastErr == nil {
+		lastErr = errors.New("no DNS servers")
+	}
+	return nil, "", lastErr
 }
 
-func axfrOne(ctx context.Context, server, zone string, timeout time.Duration) (map[string]map[uint16]bool, error) {
+func axfrOne(ctx context.Context, server, zone string, timeout time.Duration) ([]dns.RR, error) {
 	dialer := net.Dialer{Timeout: timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", server)
 	if err != nil {
@@ -578,7 +802,7 @@ func axfrOne(ctx context.Context, server, zone string, timeout time.Duration) (m
 		conn.Close()
 		return nil, err
 	}
-	found := map[string]map[uint16]bool{}
+	var out []dns.RR
 	var xerr error
 	sawSOA := false
 	for env := range ch {
@@ -590,15 +814,15 @@ func axfrOne(ctx context.Context, server, zone string, timeout time.Duration) (m
 			h := rr.Header()
 			name := strings.ToLower(h.Name)
 			if h.Rrtype == dns.TypeSOA && name == zone {
+				if sawSOA {
+					continue // the closing SOA
+				}
 				sawSOA = true
 			}
 			if noiseTypes[h.Rrtype] || !inZone(name, zone) {
 				continue
 			}
-			if found[name] == nil {
-				found[name] = map[uint16]bool{}
-			}
-			found[name][h.Rrtype] = true
+			out = append(out, rr)
 		}
 	}
 	if xerr != nil {
@@ -610,7 +834,7 @@ func axfrOne(ctx context.Context, server, zone string, timeout time.Duration) (m
 	if !sawSOA {
 		return nil, errors.New("zone transfer returned no SOA")
 	}
-	return found, nil
+	return out, nil
 }
 
 func inZone(name, zone string) bool {
@@ -660,9 +884,9 @@ func (d *zoneDiffer) typesFor(name string) []uint16 {
 			out = append(out, t)
 		}
 	}
-	// Types found at this name in a zone transfer are always checked.
+	// Types found at this name in a zone transfer or file are always checked.
 	var found []uint16
-	for t := range d.axfrTypes[name] {
+	for t := range d.foundTypes[name] {
 		if seen[t] || noiseTypes[t] {
 			continue
 		}
@@ -696,17 +920,22 @@ func containsType(ts []uint16, t uint16) bool {
 	return false
 }
 
-// run checks names (and in-zone names discovered in answers) with a bounded
-// worker pool. It returns the diffs and the total number of names checked.
-func (d *zoneDiffer) run(ctx context.Context, initial []string) ([]RecordDiff, int, error) {
+// run visits names (and in-zone names returned by visit) with a bounded
+// worker pool, calling visit concurrently. It returns the total number of
+// names visited.
+func (d *zoneDiffer) run(ctx context.Context, initial []string, visit func(ctx context.Context, name string) []string) (int, error) {
 	workers := d.opts.Concurrency
 	if workers <= 0 {
 		workers = defaultZoneDiffConcurrent
 	}
+	limit := d.maxNames
+	if limit <= 0 {
+		limit = maxZoneDiffNames
+	}
 	seen := map[string]bool{}
 	var pending []string
 	add := func(n string) {
-		if !seen[n] && len(seen) < maxZoneDiffNames {
+		if !seen[n] && len(seen) < limit {
 			seen[n] = true
 			pending = append(pending, n)
 		}
@@ -716,9 +945,8 @@ func (d *zoneDiffer) run(ctx context.Context, initial []string) ([]RecordDiff, i
 	}
 
 	var (
-		mu    sync.Mutex
-		diffs []RecordDiff
-		done  int
+		mu   sync.Mutex
+		done int
 	)
 	for len(pending) > 0 {
 		batch := pending
@@ -731,9 +959,8 @@ func (d *zoneDiffer) run(ctx context.Context, initial []string) ([]RecordDiff, i
 			go func() {
 				defer wg.Done()
 				for name := range jobs {
-					rd, more := d.diffName(ctx, name)
+					more := visit(ctx, name)
 					mu.Lock()
-					diffs = append(diffs, rd...)
 					found = append(found, more...)
 					done++
 					if d.opts.Progress != nil {
@@ -754,7 +981,7 @@ func (d *zoneDiffer) run(ctx context.Context, initial []string) ([]RecordDiff, i
 		close(jobs)
 		wg.Wait()
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 		mu.Lock()
 		sort.Strings(found)
@@ -763,14 +990,17 @@ func (d *zoneDiffer) run(ctx context.Context, initial []string) ([]RecordDiff, i
 		}
 		mu.Unlock()
 	}
-	return diffs, len(seen), nil
+	return len(seen), nil
 }
 
-// sideAnswer is one server's answer for (name, type).
+// sideAnswer is one side's answer for (name, type).
 type sideAnswer struct {
-	rrs []dns.RR // owned by the queried name, of the queried type
-	nx  bool     // name does not exist
-	err error
+	rrs   []dns.RR // owned by the queried name, of the queried type
+	nx    bool     // name does not exist
+	err   error
+	extra []string // pseudo values compared as-is (unresolved "ALIAS <target>")
+	alias []string // ALIAS targets this answer was resolved from
+	note  string
 }
 
 func (d *zoneDiffer) query(ctx context.Context, servers []string, name string, qtype uint16) sideAnswer {
@@ -802,9 +1032,105 @@ func (d *zoneDiffer) query(ctx context.Context, servers []string, name string, q
 	return a
 }
 
+// ask returns side's answer for (name, qtype).
+func (d *zoneDiffer) ask(ctx context.Context, s *zoneSide, name string, qtype uint16) sideAnswer {
+	if s.file == nil {
+		return d.query(ctx, s.servers, name, qtype)
+	}
+	if aliases := s.file.aliasFor(name, qtype); len(aliases) > 0 {
+		return d.resolveAlias(ctx, s.file, name, qtype, aliases)
+	}
+	return s.file.answer(name, qtype)
+}
+
+// resolveAlias answers (name, qtype) for an ALIAS record in a zone file with
+// the addresses its targets resolve to: in-zone targets from the file, other
+// targets via the system resolvers (only when a side is a live server).
+func (d *zoneDiffer) resolveAlias(ctx context.Context, f *fileZone, name string, qtype uint16, targets []string) sideAnswer {
+	a := sideAnswer{alias: targets}
+	var unresolved []string
+	for _, target := range targets {
+		rrs, ok := d.aliasAddrs(ctx, f, target, qtype, 0)
+		if !ok {
+			unresolved = append(unresolved, target)
+			a.extra = append(a.extra, "ALIAS "+target)
+			continue
+		}
+		for _, rr := range rrs {
+			c := dns.Copy(rr)
+			c.Header().Name = name
+			a.rrs = append(a.rrs, c)
+		}
+	}
+	a.note = "ALIAS record — compared resolved addresses of " + strings.Join(targets, ", ")
+	if len(unresolved) > 0 {
+		a.note = "ALIAS record — target " + strings.Join(unresolved, ", ") + " not resolved"
+		if !d.online() {
+			a.note += " (offline diff)"
+		}
+	}
+	return a
+}
+
+// aliasAddrs returns the qtype records of an ALIAS target; ok is false when
+// it cannot be resolved.
+func (d *zoneDiffer) aliasAddrs(ctx context.Context, f *fileZone, target string, qtype uint16, depth int) ([]dns.RR, bool) {
+	if depth > 5 {
+		return nil, false
+	}
+	if inZone(target, d.zone) && f.exists[target] {
+		if next := f.aliasFor(target, qtype); len(next) > 0 {
+			var out []dns.RR
+			for _, t := range next {
+				rrs, ok := d.aliasAddrs(ctx, f, t, qtype, depth+1)
+				if !ok {
+					return nil, false
+				}
+				out = append(out, rrs...)
+			}
+			return out, true
+		}
+		if rrs := f.rrs[target][qtype]; len(rrs) > 0 {
+			return rrs, true
+		}
+		if cn := f.rrs[target][dns.TypeCNAME]; len(cn) > 0 {
+			return d.aliasAddrs(ctx, f, strings.ToLower(cn[0].(*dns.CNAME).Target), qtype, depth+1)
+		}
+		return nil, true
+	}
+	if !d.online() {
+		return nil, false
+	}
+	resp, _, err := queryServers(ctx, zoneDiscoveryServers(), target, qtype, d.timeout)
+	if err != nil {
+		return nil, false
+	}
+	var out []dns.RR
+	for _, rr := range resp.Answer {
+		if rr.Header().Rrtype == qtype {
+			out = append(out, rr)
+		}
+	}
+	return out, true
+}
+
+// occluded reports whether name lies below a delegation in a zone file
+// (glue), where servers answer with a referral instead of the records.
+func (d *zoneDiffer) occluded(name string) bool {
+	for _, s := range []*zoneSide{d.old, d.new} {
+		if s.file != nil && s.file.occluded(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // diffName compares all relevant types at name. It returns the diffs and
 // in-zone names referenced by the records found.
 func (d *zoneDiffer) diffName(ctx context.Context, name string) ([]RecordDiff, []string) {
+	if d.occluded(name) {
+		return nil, nil
+	}
 	var (
 		diffs        []RecordDiff
 		more         []string
@@ -816,11 +1142,11 @@ func (d *zoneDiffer) diffName(ctx context.Context, name string) ([]RecordDiff, [
 		}
 		o, n := sideAnswer{nx: true}, sideAnswer{nx: true}
 		if !oldNX {
-			o = d.query(ctx, d.oldServers, name, t)
+			o = d.ask(ctx, d.old, name, t)
 			oldNX = o.nx
 		}
 		if !newNX {
-			n = d.query(ctx, []string{d.newServer}, name, t)
+			n = d.ask(ctx, d.new, name, t)
 			newNX = n.nx
 		}
 		if rd, ok := d.compare(name, t, o, n); ok {
@@ -828,6 +1154,11 @@ func (d *zoneDiffer) diffName(ctx context.Context, name string) ([]RecordDiff, [
 		}
 		more = append(more, d.targets(o.rrs)...)
 		more = append(more, d.targets(n.rrs)...)
+		for _, a := range append(append([]string(nil), o.alias...), n.alias...) {
+			if inZone(a, d.zone) {
+				more = append(more, a)
+			}
+		}
 		if oldNX && newNX {
 			break
 		}
@@ -861,16 +1192,18 @@ func (d *zoneDiffer) targets(rrs []dns.RR) []string {
 }
 
 func (d *zoneDiffer) compare(name string, qtype uint16, o, n sideAnswer) (RecordDiff, bool) {
+	// Resolved ALIAS addresses carry the resolver's TTLs: never compare those.
+	withTTL := d.opts.CompareTTL && o.alias == nil && n.alias == nil
 	rd := RecordDiff{
 		Name: name,
 		Type: dns.TypeToString[qtype],
-		Old:  d.normalize(o.rrs),
-		New:  d.normalize(n.rrs),
+		Old:  d.values(o, withTTL),
+		New:  d.values(n, withTTL),
 	}
 	if rd.Type == "" {
 		rd.Type = fmt.Sprintf("TYPE%d", qtype)
 	}
-	if name == d.wildcard {
+	if d.wildcard != "" && name == d.wildcard {
 		rd.Name = "*." + d.zone
 		rd.Note = "wildcard (probed via a random label)"
 	}
@@ -898,8 +1231,22 @@ func (d *zoneDiffer) compare(name string, qtype uint16, o, n sideAnswer) (Record
 	}
 
 	var notes []string
+	addNote := func(s string) {
+		for _, x := range notes {
+			if x == s {
+				return
+			}
+		}
+		notes = append(notes, s)
+	}
 	if rd.Note != "" {
-		notes = append(notes, rd.Note)
+		addNote(rd.Note)
+	}
+	if o.note != "" {
+		addNote(o.note)
+	}
+	if n.note != "" {
+		addNote(n.note)
 	}
 	if qtype == dns.TypeSOA {
 		note := "SOA serial ignored"
@@ -910,14 +1257,115 @@ func (d *zoneDiffer) compare(name string, qtype uint16, o, n sideAnswer) (Record
 			note += "; primary NS/contact usually differ between providers"
 			rd.Expected = true
 		}
-		notes = append(notes, note)
+		addNote(note)
 	}
-	if qtype == dns.TypeNS && name == d.zone && rd.Status != DiffMatch && rd.Status != DiffError {
-		notes = append(notes, "apex NS expected to differ when changing provider")
+	apexNS := qtype == dns.TypeNS && name == d.zone
+	if apexNS && rd.Status != DiffMatch && rd.Status != DiffError {
+		addNote("apex NS expected to differ when changing provider")
 		rd.Expected = rd.Status == DiffChanged
+	}
+	// Provider exports often leave out the SOA and apex NS, which the
+	// provider manages itself.
+	if (qtype == dns.TypeSOA || apexNS) && (rd.Status == DiffMissing || rd.Status == DiffExtra) {
+		lacking := d.new
+		if rd.Status == DiffExtra {
+			lacking = d.old
+		}
+		if lacking.file != nil && len(lacking.file.rrs[d.zone][qtype]) == 0 {
+			rd.Expected = true
+			addNote(rd.Type + " not in the zone file (managed by the DNS provider)")
+		}
+	}
+	if rd.Status != DiffMatch && rd.Status != DiffError &&
+		(cloudflareProxied(d.old, d.new, n, name, qtype) || cloudflareProxied(d.new, d.old, o, name, qtype)) {
+		rd.Expected = true
+		addNote("proxied by Cloudflare")
 	}
 	rd.Note = strings.Join(notes, "; ")
 	return rd, true
+}
+
+// cloudflareProxied reports whether a difference at (name, qtype) between
+// the zone file of fileSide and the live answer liveAns of liveSide is
+// explained by Cloudflare's proxy: the record is proxied in the file, and the
+// live server answers with Cloudflare anycast addresses (A/AAAA) or has
+// flattened the CNAME.
+func cloudflareProxied(fileSide, liveSide *zoneSide, liveAns sideAnswer, name string, qtype uint16) bool {
+	if fileSide.file == nil || liveSide.file != nil || !fileSide.file.proxied[name] || liveAns.nx || liveAns.err != nil {
+		return false
+	}
+	switch qtype {
+	case dns.TypeCNAME:
+		return len(liveAns.rrs) == 0
+	case dns.TypeA, dns.TypeAAAA:
+		if len(liveAns.rrs) == 0 {
+			return false
+		}
+		for _, rr := range liveAns.rrs {
+			var ip net.IP
+			switch v := rr.(type) {
+			case *dns.A:
+				ip = v.A
+			case *dns.AAAA:
+				ip = v.AAAA
+			}
+			if !isCloudflareIP(ip) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// cloudflareNets are Cloudflare's published proxy ranges
+// (https://www.cloudflare.com/ips/).
+var cloudflareNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+		"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+		"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+		"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+		"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+		"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+	} {
+		_, n, err := net.ParseCIDR(c)
+		if err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
+func isCloudflareIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, n := range cloudflareNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// values renders an answer as sorted, de-duplicated value strings.
+func (d *zoneDiffer) values(a sideAnswer, withTTL bool) []string {
+	out := normalizeRRs(a.rrs, withTTL)
+	if len(a.extra) == 0 {
+		return out
+	}
+	set := map[string]bool{}
+	for _, s := range append(out, a.extra...) {
+		set[s] = true
+	}
+	out = out[:0]
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func soaSerial(rrs []dns.RR) string {
@@ -941,12 +1389,12 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// normalize renders records as sorted, de-duplicated rdata strings.
-func (d *zoneDiffer) normalize(rrs []dns.RR) []string {
+// normalizeRRs renders records as sorted, de-duplicated rdata strings.
+func normalizeRRs(rrs []dns.RR, withTTL bool) []string {
 	set := map[string]bool{}
 	for _, rr := range rrs {
 		s := rdataString(rr)
-		if d.opts.CompareTTL {
+		if withTTL {
 			s += fmt.Sprintf(" ttl=%d", rr.Header().Ttl)
 		}
 		set[s] = true
@@ -1001,6 +1449,33 @@ func compareNames(a, b string) int {
 	return len(la) - len(lb)
 }
 
+// OldSource describes the old side: "zone file <label>" or the servers.
+func (r *ZoneDiffResult) OldSource() string {
+	if r.OldFile != "" {
+		return fileSource(r.OldFile)
+	}
+	return strings.Join(r.OldServers, ", ")
+}
+
+// NewSource describes the new side: "zone file <label>", the discovered
+// authoritative servers, or the new server.
+func (r *ZoneDiffResult) NewSource() string {
+	switch {
+	case r.NewFile != "":
+		return fileSource(r.NewFile)
+	case len(r.NewServers) > 0:
+		return strings.Join(r.NewServers, ", ") + " (live authoritative)"
+	}
+	return r.NewServer
+}
+
+func fileSource(label string) string {
+	if label == "zone file" {
+		return label
+	}
+	return "zone file " + label
+}
+
 // FormatZoneDiff renders r as plain text: a header, a summary line, then one
 // block per record that differs (and per matching record if showMatches):
 //
@@ -1015,9 +1490,13 @@ func FormatZoneDiff(r *ZoneDiffResult, showMatches bool) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Zone diff for %s\n", r.Domain)
-	fmt.Fprintf(&b, "  old: %s\n", strings.Join(r.OldServers, ", "))
-	fmt.Fprintf(&b, "  new: %s\n", r.NewServer)
-	fmt.Fprintf(&b, "  enumeration: %s\n\n", r.Enumeration)
+	fmt.Fprintf(&b, "  old: %s\n", r.OldSource())
+	fmt.Fprintf(&b, "  new: %s\n", r.NewSource())
+	fmt.Fprintf(&b, "  enumeration: %s\n", r.Enumeration)
+	for _, w := range r.Warnings {
+		fmt.Fprintf(&b, "  warning: %s\n", w)
+	}
+	b.WriteString("\n")
 	parts := make([]string, 0, len(AllDiffStatuses))
 	for _, s := range AllDiffStatuses {
 		parts = append(parts, fmt.Sprintf("%d %s", r.Counts[s], s))
@@ -1107,4 +1586,168 @@ func writeSetDiff(b *strings.Builder, old, nw []string) {
 			fmt.Fprintf(b, "    + new: %s\n", s)
 		}
 	}
+}
+
+// fileZone is a zone file indexed for answering diff queries.
+type fileZone struct {
+	zone        string
+	rrs         map[string]map[uint16][]dns.RR
+	alias       map[string][]fileAlias
+	types       map[string]map[uint16]bool // owner name -> types, for enumeration
+	exists      map[string]bool            // owner names and empty non-terminals
+	delegations map[string]bool            // non-apex names with NS records
+	proxied     map[string]bool            // names with a Cloudflare-proxied record
+	count       int                        // records used
+}
+
+// fileAlias is a provider ALIAS record; types nil means A and AAAA.
+type fileAlias struct {
+	target string
+	types  []uint16
+}
+
+// newFileZone indexes z's records inside zone. Records that cannot be parsed
+// or lie outside the zone are skipped with a warning.
+func newFileZone(z *zonefile.Zone, zone string) (*fileZone, []string, error) {
+	if o := strings.ToLower(strings.TrimSpace(z.Origin)); o != "" && o != "." && dns.Fqdn(o) != zone {
+		return nil, nil, fmt.Errorf("origin %s does not match the domain %s", dns.Fqdn(o), zone)
+	}
+	f := &fileZone{
+		zone:        zone,
+		rrs:         map[string]map[uint16][]dns.RR{},
+		alias:       map[string][]fileAlias{},
+		types:       map[string]map[uint16]bool{},
+		exists:      map[string]bool{zone: true},
+		delegations: map[string]bool{},
+		proxied:     map[string]bool{},
+	}
+	var warnings []string
+	outside := 0
+	addType := func(name string, t uint16) {
+		if f.types[name] == nil {
+			f.types[name] = map[uint16]bool{}
+		}
+		f.types[name][t] = true
+	}
+	for _, r := range z.Records {
+		name := strings.ToLower(dns.Fqdn(strings.TrimSpace(r.Name)))
+		if !inZone(name, zone) {
+			outside++
+			continue
+		}
+		typ := strings.ToUpper(strings.TrimSpace(r.Type))
+		if typ == zonefile.AliasType || typ == "ANAME" {
+			a := fileAlias{target: strings.ToLower(dns.Fqdn(strings.TrimSpace(r.Data)))}
+			if i := strings.Index(r.Comment, "alias-type="); i >= 0 {
+				v := strings.Fields(r.Comment[i+len("alias-type="):])
+				if len(v) > 0 {
+					if t, ok := dns.StringToType[strings.ToUpper(v[0])]; ok && (t == dns.TypeA || t == dns.TypeAAAA) {
+						a.types = []uint16{t}
+					}
+				}
+			}
+			f.alias[name] = append(f.alias[name], a)
+			ts := a.types
+			if ts == nil {
+				ts = []uint16{dns.TypeA, dns.TypeAAAA}
+			}
+			for _, t := range ts {
+				addType(name, t)
+			}
+		} else {
+			r.Name, r.Type = name, typ
+			rr, err := r.RR(zone)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("skipped %s %s %s: %v", name, typ, r.Data, err))
+				continue
+			}
+			t := rr.Header().Rrtype
+			if noiseTypes[t] {
+				continue
+			}
+			if f.rrs[name] == nil {
+				f.rrs[name] = map[uint16][]dns.RR{}
+			}
+			f.rrs[name][t] = append(f.rrs[name][t], rr)
+			addType(name, t)
+			if t == dns.TypeNS && name != zone {
+				f.delegations[name] = true
+			}
+		}
+		if r.Proxied != nil && *r.Proxied {
+			f.proxied[name] = true
+		}
+		f.count++
+		for n := name; n != zone && n != "."; n = parentName(n) {
+			f.exists[n] = true
+		}
+	}
+	if outside > 0 && f.count == 0 {
+		return nil, nil, fmt.Errorf("none of its %d records are inside %s (wrong domain or origin?)", outside, zone)
+	}
+	if outside > 0 {
+		warnings = append(warnings, fmt.Sprintf("ignored %d record(s) outside %s", outside, zone))
+	}
+	return f, warnings, nil
+}
+
+// parentName returns name without its first label ("." for a TLD).
+func parentName(name string) string {
+	if i := strings.Index(name, "."); i >= 0 && i < len(name)-1 {
+		return name[i+1:]
+	}
+	return "."
+}
+
+// occluded reports whether name lies strictly below a delegation.
+func (f *fileZone) occluded(name string) bool {
+	if !inZone(name, f.zone) {
+		return false
+	}
+	for p := parentName(name); p != f.zone && inZone(p, f.zone); p = parentName(p) {
+		if f.delegations[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// aliasFor returns the ALIAS targets at name that apply to qtype.
+func (f *fileZone) aliasFor(name string, qtype uint16) []string {
+	if qtype != dns.TypeA && qtype != dns.TypeAAAA {
+		return nil
+	}
+	var out []string
+	for _, a := range f.alias[name] {
+		if a.types == nil || containsType(a.types, qtype) {
+			out = append(out, a.target)
+		}
+	}
+	return out
+}
+
+// answer answers (name, qtype) from the file like an authoritative server
+// would, including wildcard synthesis.
+func (f *fileZone) answer(name string, qtype uint16) sideAnswer {
+	if f.exists[name] {
+		return sideAnswer{rrs: f.rrs[name][qtype]}
+	}
+	for p := parentName(name); inZone(p, f.zone); p = parentName(p) {
+		if !f.exists[p] {
+			continue
+		}
+		// p is the closest encloser.
+		w := "*." + p
+		if !f.exists[w] {
+			break
+		}
+		var out []dns.RR
+		for _, rr := range f.rrs[w][qtype] {
+			c := dns.Copy(rr)
+			c.Header().Name = name
+			out = append(out, c)
+		}
+		return sideAnswer{rrs: out}
+	}
+	return sideAnswer{nx: true}
 }

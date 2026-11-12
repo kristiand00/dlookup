@@ -170,3 +170,111 @@ func TestMainHelpMentionsZoneDiff(t *testing.T) {
 		t.Errorf("main help does not mention zonediff:\n%s", errb.String())
 	}
 }
+
+const cliOldZone = `$ORIGIN example.com.
+$TTL 300
+@    IN SOA ns1.old.test. hostmaster.example.com. 1 7200 3600 1209600 300
+@    IN NS  ns1.old.test.
+@    IN A   192.0.2.1
+www  IN CNAME @
+shop IN A   192.0.2.20
+`
+
+func writeTemp(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestParseZoneDiffFileArgs(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := writeTemp(t, dir, "old.zone", cliOldZone)
+	// No $ORIGIN: needs the domain / --origin.
+	bare := writeTemp(t, dir, "bare.txt", "@ 300 IN A 192.0.2.1\nwww 300 IN A 192.0.2.2\n")
+	var stderr bytes.Buffer
+
+	// Domain taken from the file's origin; no --new needed (live zone).
+	cfg, err := parseZoneDiffArgs([]string{"--old-file", oldFile, "--probe"}, nil, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := cfg.Opts
+	if o.Domain != "example.com" || o.OldZone == nil || o.OldZoneLabel != oldFile || o.NewServer != "" || o.NewZone != nil || !o.Probe {
+		t.Errorf("opts = %+v", o)
+	}
+	if len(o.OldZone.Lookup("shop.example.com.", "A")) != 1 {
+		t.Errorf("zone = %+v", o.OldZone)
+	}
+
+	// Explicit format and origin; both files.
+	cfg, err = parseZoneDiffArgs([]string{"example.com", "--old-file", oldFile, "--new-file", bare, "--new-format", "bind"}, nil, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Opts.NewZone == nil || cfg.Opts.NewZone.Origin != "example.com." || len(cfg.Opts.NewZone.Lookup("www", "A")) != 1 {
+		t.Errorf("new zone = %+v", cfg.Opts.NewZone)
+	}
+	cfg, err = parseZoneDiffArgs([]string{"--old-file", bare, "--old-format", "zone", "--origin", "example.org", "--new", "192.0.2.53"}, nil, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Opts.Domain != "example.org" || cfg.Opts.OldZone.Origin != "example.org." {
+		t.Errorf("origin: %q %q", cfg.Opts.Domain, cfg.Opts.OldZone.Origin)
+	}
+
+	bad := [][]string{
+		{"--old-file", bare, "--old-format", "bind"}, // no domain, no origin
+		{"example.com", "--old-file", oldFile, "--old", "192.0.2.1"},
+		{"example.com", "--new-file", oldFile, "--new", "192.0.2.1"},
+		{"example.com", "--old-format", "bind", "--new", "192.0.2.1"},
+		{"example.com", "--new-format", "bind", "--new", "192.0.2.1"},
+		{"example.com", "--old-file", filepath.Join(dir, "missing.zone")},
+		{"example.com", "--old-file", oldFile, "--old-format", "bogus"},
+		{"example.com", "--old-file", oldFile, "--old-format", "terraform"}, // write-only
+		{"example.com", "--old-file", writeTemp(t, dir, "broken.zone", "@ IN A not-an-ip\n")},
+	}
+	for _, args := range bad {
+		if _, err := parseZoneDiffArgs(args, nil, &stderr); !errors.Is(err, errUsage) {
+			t.Errorf("%q: err = %v, want usage error", args, err)
+		}
+	}
+}
+
+func TestRunZoneDiffFilesOffline(t *testing.T) {
+	dir := t.TempDir()
+	oldFile := writeTemp(t, dir, "old.zone", cliOldZone)
+	same := writeTemp(t, dir, "same.zone", cliOldZone)
+	changed := writeTemp(t, dir, "new.zone", strings.Replace(cliOldZone, "192.0.2.20", "192.0.2.21", 1))
+
+	run1 := func(args ...string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := run(append([]string{"zonediff"}, args...), strings.NewReader(""), &out, &errb)
+		return code, out.String(), errb.String()
+	}
+	code, out, errOut := run1("--old-file", oldFile, "--new-file", same)
+	if code != 0 || !strings.Contains(out, "No differences found.") || !strings.Contains(out, "old file (5 records) + new file (5 records)") {
+		t.Errorf("same: code=%d out=%q err=%q", code, out, errOut)
+	}
+	code, out, _ = run1("example.com", "--old-file", oldFile, "--new-file", changed)
+	if code != 1 || !strings.Contains(out, "~ shop.example.com. A") || !strings.Contains(out, "old: zone file "+oldFile) {
+		t.Errorf("changed: code=%d out=%q", code, out)
+	}
+	code, _, errOut = run1("example.com", "--old-file", filepath.Join(dir, "nope.zone"))
+	if code != 2 || !strings.Contains(errOut, "--old-file") {
+		t.Errorf("missing file: code=%d err=%q", code, errOut)
+	}
+	// Origin mismatch is a runtime error from the diff.
+	code, _, errOut = run1("example.org", "--old-file", oldFile, "--new-file", same)
+	if code != 3 || !strings.Contains(errOut, "origin") {
+		t.Errorf("origin mismatch: code=%d err=%q", code, errOut)
+	}
+	code, _, errOut = run1("--help")
+	for _, want := range []string{"--old-file", "--new-file", "--probe", "Offline diff of two exports", "--old-file cloudflare-export.json --new ns-"} {
+		if code != 0 || !strings.Contains(errOut, want) {
+			t.Errorf("help missing %q", want)
+		}
+	}
+}

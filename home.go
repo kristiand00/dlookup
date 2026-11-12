@@ -120,6 +120,8 @@ func helpContent(cfg AppConfig, width int) string {
 		"Comprehensive Report: every lookup for a target in one view",
 		"Watch mode: re-run on an interval, changes highlighted (+/-), ● on background tabs",
 		"Zone diff: compare a domain's records on its nameservers with a new DNS server",
+		"Zone files: import/export/convert BIND, Cloudflare, Route 53, Terraform, OctoDNS, DNSControl, CSV (Zone menu, alt+z)",
+		"Health checks: Propagation, Delegation, Email (SPF/DMARC/DKIM), Takeover, DNSSEC, TTL plan",
 		"Custom DNS server per tab (or --server for all tabs)",
 		"Export a tab or all tabs to a file; copy a result to the clipboard",
 		"Tabs: every lookup runs in its own tab, in parallel",
@@ -167,6 +169,8 @@ func helpContent(cfg AppConfig, width int) string {
 	line("  dlookup -o json --lookup rdap a.com    headless output (text or json)")
 	line("  dlookup zonediff example.com --new ns1.newprovider.com")
 	line("  dlookup sdig 1.1.1.1 53 example.com A recurse")
+	line("  dlookup zone convert export.json --to route53-change -o changes.json")
+	line("  dlookup -o text --lookup email example.com")
 	line("  dlookup --help                         all options")
 
 	section("Configuration")

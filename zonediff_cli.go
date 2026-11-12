@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"dlookup/lookup"
+	"dlookup/zonefile"
 
 	"github.com/miekg/dns"
 )
@@ -55,9 +57,21 @@ func parseZoneDiffArgs(args []string, stdin io.Reader, stderr io.Writer) (*zoneD
 		ttl       bool
 		timeout   time.Duration
 		conc      int
+		oldFile   string
+		newFile   string
+		oldFormat string
+		newFormat string
+		origin    string
+		probe     bool
 	)
-	fs.StringVar(&newServer, "new", "", "New DNS `server` to check (required): IP, host or host:port")
+	fs.StringVar(&newServer, "new", "", "New DNS `server` to check: IP, host or host:port (required unless a zone file is given)")
 	fs.StringVar(&oldServer, "old", "", "Current DNS `server` (default: the domain's authoritative nameservers)")
+	fs.StringVar(&oldFile, "old-file", "", "Use the zone file `FILE` as the old side (a provider export); without --new/--new-file it is compared with the live zone")
+	fs.StringVar(&newFile, "new-file", "", "Use the zone file `FILE` as the new side instead of --new")
+	fs.StringVar(&oldFormat, "old-format", "", "Format of --old-file (default: detected): "+zoneFormatList())
+	fs.StringVar(&newFormat, "new-format", "", "Format of --new-file (default: detected)")
+	fs.StringVar(&origin, "origin", "", "Zone `origin` for files that do not name it (default: the domain)")
+	fs.BoolVar(&probe, "probe", false, "With zone files: also probe common names (www, mail, _dmarc, ...)")
 	fs.StringVar(&names, "names", "", "Extra comma-separated `names` to check (relative like \"shop\" or FQDN)")
 	fs.StringVar(&namesFile, "names-file", "", "Read extra names from `FILE`, one per line (\"-\" = stdin)")
 	fs.StringVar(&types, "types", "", "Comma-separated record `types` to compare (default A,AAAA,CNAME,MX,NS,TXT,SOA,CAA,SRV)")
@@ -79,18 +93,57 @@ func parseZoneDiffArgs(args []string, stdin io.Reader, stderr io.Writer) (*zoneD
 	}
 	usageErr := func(format string, a ...any) error { return usageError{fmt.Sprintf(format, a...)} }
 
-	if len(positional) != 1 {
+	if len(positional) > 1 || (len(positional) == 0 && oldFile == "" && newFile == "") {
 		return nil, usageErr("zonediff needs exactly one domain (got %d arguments)", len(positional))
 	}
-	domain, err := lookup.NormalizeTarget(positional[0])
-	if err != nil {
-		return nil, usageErr("%v", err)
+	var domain string
+	if len(positional) == 1 {
+		if domain, err = lookup.NormalizeTarget(positional[0]); err != nil {
+			return nil, usageErr("%v", err)
+		}
 	}
-	if newServer == "" {
-		return nil, usageErr("--new <server> is required")
+	switch {
+	case oldFile != "" && oldServer != "":
+		return nil, usageErr("--old and --old-file are mutually exclusive")
+	case newFile != "" && newServer != "":
+		return nil, usageErr("--new and --new-file are mutually exclusive")
+	case oldFormat != "" && oldFile == "":
+		return nil, usageErr("--old-format needs --old-file")
+	case newFormat != "" && newFile == "":
+		return nil, usageErr("--new-format needs --new-file")
+	case newServer == "" && newFile == "" && oldFile == "":
+		return nil, usageErr("--new <server> is required (or --new-file / --old-file)")
 	}
-	if err := lookup.ValidateServer(newServer); err != nil {
-		return nil, usageErr("--new: %v", err)
+	if newServer != "" {
+		if err := lookup.ValidateServer(newServer); err != nil {
+			return nil, usageErr("--new: %v", err)
+		}
+	}
+	if origin == "" {
+		origin = domain
+	}
+	if oldFile != "" {
+		if cfg.Opts.OldZone, err = loadZoneFile(oldFile, oldFormat, origin); err != nil {
+			return nil, usageErr("--old-file: %v", err)
+		}
+		cfg.Opts.OldZoneLabel = oldFile
+	}
+	if newFile != "" {
+		if cfg.Opts.NewZone, err = loadZoneFile(newFile, newFormat, origin); err != nil {
+			return nil, usageErr("--new-file: %v", err)
+		}
+		cfg.Opts.NewZoneLabel = newFile
+	}
+	if domain == "" {
+		for _, z := range []*zonefile.Zone{cfg.Opts.OldZone, cfg.Opts.NewZone} {
+			if z != nil && z.Origin != "" && z.Origin != "." {
+				domain = strings.TrimSuffix(z.Origin, ".")
+				break
+			}
+		}
+		if domain == "" {
+			return nil, usageErr("no domain given and the zone file does not name its origin; pass the domain or --origin")
+		}
 	}
 	if oldServer != "" {
 		if err := lookup.ValidateServer(oldServer); err != nil {
@@ -147,18 +200,53 @@ func parseZoneDiffArgs(args []string, stdin io.Reader, stderr io.Writer) (*zoneD
 		qtypes = append(qtypes, qt)
 	}
 
-	cfg.Opts = lookup.ZoneDiffOptions{
-		Domain:      domain,
-		OldServer:   oldServer,
-		NewServer:   newServer,
-		ExtraNames:  extra,
-		Types:       qtypes,
-		CompareTTL:  ttl,
-		TryAXFR:     !noAXFR,
-		Timeout:     timeout,
-		Concurrency: conc,
-	}
+	cfg.Opts.Domain = domain
+	cfg.Opts.OldServer = oldServer
+	cfg.Opts.NewServer = newServer
+	cfg.Opts.ExtraNames = extra
+	cfg.Opts.Types = qtypes
+	cfg.Opts.CompareTTL = ttl
+	cfg.Opts.TryAXFR = !noAXFR
+	cfg.Opts.Timeout = timeout
+	cfg.Opts.Concurrency = conc
+	cfg.Opts.Probe = probe
 	return cfg, nil
+}
+
+// zoneFormatList lists the readable zone file formats.
+func zoneFormatList() string {
+	var names []string
+	for _, f := range zonefile.Formats() {
+		if zonefile.CanRead(f) {
+			names = append(names, string(f))
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// loadZoneFile reads and parses a zone file. format "" is detected from the
+// file name and contents; origin "" means the file must name it.
+func loadZoneFile(path, format, origin string) (*zonefile.Zone, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f zonefile.Format
+	if format != "" {
+		if f, err = zonefile.ParseFormat(format); err != nil {
+			return nil, err
+		}
+	} else if f, err = zonefile.Detect(path, data); err != nil {
+		return nil, err
+	}
+	if !zonefile.CanRead(f) {
+		return nil, fmt.Errorf("format %s can only be written, not read", f)
+	}
+	z, err := zonefile.Parse(bytes.NewReader(data), f, origin)
+	if err != nil {
+		return nil, err
+	}
+	return z, nil
 }
 
 // runZoneDiff implements "dlookup zonediff". Exit codes: 0 no differences,
@@ -220,23 +308,33 @@ func isTerminal(w io.Writer) bool {
 
 func printZoneDiffUsage(fs *flag.FlagSet) {
 	w := fs.Output()
-	fmt.Fprint(w, `dlookup zonediff - compare a domain's records on two DNS servers
+	fmt.Fprint(w, `dlookup zonediff - compare a domain's records on two DNS servers or zone files
 
 Usage:
   dlookup zonediff <domain> --new <server> [options]
+  dlookup zonediff [<domain>] --old-file <export> [--new <server> | --new-file <file>] [options]
 
 Checks that a new DNS server (e.g. a new provider, before switching the NS
 delegation) serves the same records as the current one. Without --old, the
 domain's current authoritative nameservers are discovered and queried.
 
-Names are enumerated by zone transfer (AXFR) if either server allows it,
-otherwise by probing the apex, common names (www, mail, _dmarc, DKIM
-selectors, SRV names, a wildcard check, ...) and in-zone CNAME/MX/NS/SRV
-targets. Use --names / --names-file for names that cannot be guessed.
-SOA serials and TTLs (unless --ttl) are ignored.
+Either side can be a zone file instead: a provider export (BIND zone file,
+Cloudflare JSON, Route 53 JSON, OctoDNS YAML, CSV, dlookup JSON; the format
+is detected unless --old-format/--new-format is given). Every record in a
+file is checked, so nothing has to be guessed. --old-file without --new or
+--new-file compares the export with the live zone (its authoritative
+nameservers). Two files are compared offline. Route 53 ALIAS records are
+compared by the addresses their target resolves to; differences caused by
+Cloudflare's proxy (proxied records) are marked [expected].
 
-Exit codes: 0 no differences, 1 differences found, 2 usage error,
-3 runtime error (e.g. a server could not be reached).
+Names are enumerated from zone files, by zone transfer (AXFR) if a server
+allows it, otherwise by probing the apex, common names (www, mail, _dmarc,
+DKIM selectors, SRV names, a wildcard check, ...) and in-zone CNAME/MX/NS/SRV
+targets (with zone files only with --probe). Use --names / --names-file for
+names that cannot be guessed. SOA serials and TTLs (unless --ttl) are ignored.
+
+Exit codes: 0 no differences, 1 differences found, 2 usage error (including
+unreadable zone files), 3 runtime error (e.g. a server could not be reached).
 
 Options:
 `)
@@ -249,5 +347,12 @@ Examples:
   dlookup zonediff example.com --new ns1.newprovider.net
   dlookup zonediff example.com --old 192.0.2.53 --new 198.51.100.53:5353 --names shop,intranet
   dlookup zonediff --new 198.51.100.53 --no-axfr --types A,MX,TXT -o json example.com
+
+  # Cloudflare export vs the new Route 53 nameservers, before the NS switch
+  dlookup zonediff example.com --old-file cloudflare-export.json --new ns-123.awsdns-45.com
+  # Is the live zone what the export says? (e.g. after an import)
+  dlookup zonediff example.com --old-file example.com.zone
+  # Offline diff of two exports
+  dlookup zonediff --old-file cloudflare.json --new-file route53.json --new-format route53 example.com
 `)
 }

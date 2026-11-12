@@ -3,6 +3,7 @@ package lookup
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +53,7 @@ func (p *ComprehensiveProvider) Execute(ctx context.Context, target string, opts
 		return "", err
 	}
 	target = strings.TrimSpace(target)
+	isIP := net.ParseIP(target) != nil
 	providers := AvailableProviders()
 
 	var wg sync.WaitGroup
@@ -61,6 +63,9 @@ func (p *ComprehensiveProvider) Execute(ctx context.Context, target string, opts
 	for _, prov := range providers {
 		if prov.Name() == ComprehensiveReportName || excludedFromReport(prov) {
 			continue // Skip self and opted-out providers
+		}
+		if isIP && domainOnly(prov) {
+			continue // e.g. Delegation, Email, DNSSEC need a domain name
 		}
 		wg.Add(1)
 		go func(sub LookupProvider) {
@@ -126,7 +131,7 @@ func GetComprehensiveReportOrder() []string {
 	return []string{
 		"NSLOOKUP", "DIG (A)", "DIG (AAAA)", "DIG (CNAME)", "DIG (MX)",
 		"DIG (NS)", "DIG (SOA)", "DIG (TXT)", "DIG (SPF)", "DIG (DMARC)",
-		"DIG (CAA)", "DIG (PTR)", "RDAP", "WHOIS",
+		"DIG (CAA)", "DIG (PTR)", "Delegation", "DNSSEC", "Email", "RDAP", "WHOIS",
 	}
 }
 

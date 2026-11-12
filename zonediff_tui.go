@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dlookup/lookup"
+	"dlookup/zonefile"
 )
 
 // zoneDiffName is the lookup-list entry (and tab lookupType) of the zone diff
@@ -25,17 +28,57 @@ const zoneDiffProgressInterval = 150 * time.Millisecond
 // diffZoneFunc runs a zone diff; replaced in tests.
 var diffZoneFunc = lookup.DiffZone
 
+// Zone diff dialog sources ("oldsrc" / "newsrc" select values).
+const (
+	zdSrcAuth   = "auth"   // the domain's authoritative nameservers
+	zdSrcServer = "server" // a given server
+	zdSrcFile   = "file"   // a zone file (provider export)
+)
+
 // zoneDiffForm holds the zone diff dialog values. It lives on the tab, so the
 // last values are kept for quick re-runs.
 type zoneDiffForm struct {
 	newServer  string
 	oldServer  string
+	oldSource  string // zdSrcAuth (default), zdSrcServer or zdSrcFile
+	newSource  string // zdSrcServer (default), zdSrcFile or zdSrcAuth (live, with an old file)
+	oldFile    string
+	newFile    string
 	extraNames string
 	compareTTL bool
 	tryAXFR    bool
+	probe      bool
 }
 
-func newZoneDiffForm() zoneDiffForm { return zoneDiffForm{tryAXFR: true} }
+func newZoneDiffForm() zoneDiffForm {
+	return zoneDiffForm{tryAXFR: true, oldSource: zdSrcAuth, newSource: zdSrcServer}
+}
+
+// sources returns the form's old and new source with defaults applied.
+func (f zoneDiffForm) sources() (old, nw string) {
+	old, nw = f.oldSource, f.newSource
+	if old == "" {
+		old = zdSrcAuth
+		if strings.TrimSpace(f.oldServer) != "" {
+			old = zdSrcServer
+		}
+	}
+	if nw == "" {
+		nw = zdSrcServer
+	}
+	return old, nw
+}
+
+// expandHomePath expands a leading "~/" to the home directory.
+func expandHomePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
+}
 
 // zoneDiffProgress is written by DiffZone's Progress callback (from any
 // goroutine) and polled by the tab.
@@ -84,39 +127,98 @@ func parseExtraNames(s string) []string {
 	return out
 }
 
-// zoneDiffOptions validates a zone diff request and builds the run options.
+// zoneDiffOptions validates a zone diff request and builds the run options,
+// reading and parsing zone files. The domain may be empty when a zone file
+// names its origin.
 func zoneDiffOptions(domain string, f zoneDiffForm) (lookup.ZoneDiffOptions, error) {
+	var opts lookup.ZoneDiffOptions
+	oldSrc, newSrc := f.sources()
 	domain = strings.TrimSpace(domain)
-	if domain == "" {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("domain is required")
+	if domain == "" && oldSrc != zdSrcFile && newSrc != zdSrcFile {
+		return opts, fmt.Errorf("domain is required")
 	}
-	if net.ParseIP(domain) != nil {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("zone diff needs a domain name, not %q", domain)
-	}
-	if err := lookup.ValidateTarget(domain); err != nil {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("domain: %w", err)
-	}
-	newServer := strings.TrimSpace(f.newServer)
-	if newServer == "" {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("new server is required")
-	}
-	if err := lookup.ValidateServer(newServer); err != nil {
-		return lookup.ZoneDiffOptions{}, fmt.Errorf("new server: %w", err)
-	}
-	oldServer := strings.TrimSpace(f.oldServer)
-	if oldServer != "" {
-		if err := lookup.ValidateServer(oldServer); err != nil {
-			return lookup.ZoneDiffOptions{}, fmt.Errorf("old server: %w", err)
+	if domain != "" {
+		if net.ParseIP(domain) != nil {
+			return opts, fmt.Errorf("zone diff needs a domain name, not %q", domain)
+		}
+		if err := lookup.ValidateTarget(domain); err != nil {
+			return opts, fmt.Errorf("domain: %w", err)
 		}
 	}
-	return lookup.ZoneDiffOptions{
-		Domain:     domain,
-		OldServer:  oldServer,
-		NewServer:  newServer,
-		ExtraNames: parseExtraNames(f.extraNames),
-		CompareTTL: f.compareTTL,
-		TryAXFR:    f.tryAXFR,
-	}, nil
+
+	switch oldSrc {
+	case zdSrcServer:
+		opts.OldServer = strings.TrimSpace(f.oldServer)
+		if opts.OldServer == "" {
+			return opts, fmt.Errorf("old server is required (or choose Authoritative servers)")
+		}
+		if err := lookup.ValidateServer(opts.OldServer); err != nil {
+			return opts, fmt.Errorf("old server: %w", err)
+		}
+	case zdSrcFile:
+		z, label, err := loadDialogZoneFile("old", f.oldFile, domain)
+		if err != nil {
+			return opts, err
+		}
+		opts.OldZone, opts.OldZoneLabel = z, label
+	}
+	switch newSrc {
+	case zdSrcFile:
+		z, label, err := loadDialogZoneFile("new", f.newFile, domain)
+		if err != nil {
+			return opts, err
+		}
+		opts.NewZone, opts.NewZoneLabel = z, label
+	case zdSrcAuth:
+		if oldSrc != zdSrcFile {
+			return opts, fmt.Errorf("live authoritative servers as the new side need an old zone file")
+		}
+	default:
+		opts.NewServer = strings.TrimSpace(f.newServer)
+		if opts.NewServer == "" {
+			return opts, fmt.Errorf("new server is required")
+		}
+		if err := lookup.ValidateServer(opts.NewServer); err != nil {
+			return opts, fmt.Errorf("new server: %w", err)
+		}
+	}
+	if domain == "" {
+		for _, z := range []*zonefile.Zone{opts.OldZone, opts.NewZone} {
+			if z != nil && z.Origin != "" && z.Origin != "." {
+				domain = strings.TrimSuffix(z.Origin, ".")
+				break
+			}
+		}
+		if domain == "" {
+			return opts, fmt.Errorf("domain is required (the zone file does not name its origin)")
+		}
+	}
+	opts.Domain = domain
+	opts.ExtraNames = parseExtraNames(f.extraNames)
+	opts.CompareTTL = f.compareTTL
+	opts.TryAXFR = f.tryAXFR
+	opts.Probe = f.probe
+	return opts, nil
+}
+
+// loadDialogZoneFile reads and parses the zone file at path (format
+// detected; origin defaults to domain).
+func loadDialogZoneFile(which, path, domain string) (*zonefile.Zone, string, error) {
+	label := strings.TrimSpace(path)
+	if label == "" {
+		return nil, "", fmt.Errorf("%s zone file: enter a file path", which)
+	}
+	full := expandHomePath(label)
+	if st, err := os.Stat(full); err != nil {
+		return nil, "", fmt.Errorf("%s zone file: %w", which, err)
+	} else if st.IsDir() {
+		return nil, "", fmt.Errorf("%s zone file: %s is a directory", which, label)
+	}
+	z, err := loadZoneFile(full, "", domain)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s zone file: %w", which, err)
+	}
+	return z, label, nil
 }
 
 // runZoneDiff starts a zone diff with opts in this tab, replacing whatever it
@@ -136,7 +238,14 @@ func (m *tabModel) runZoneDiff(opts lookup.ZoneDiffOptions) tea.Cmd {
 
 // zoneDiffLoadingMsg is the loading line for the current run.
 func (m tabModel) zoneDiffLoadingMsg() string {
-	s := fmt.Sprintf("Diffing %s against %s...", m.domain, m.zd.opts.NewServer)
+	against := m.zd.opts.NewServer
+	switch {
+	case m.zd.opts.NewZone != nil:
+		against = m.zd.opts.NewZoneLabel
+	case against == "":
+		against = "the live zone"
+	}
+	s := fmt.Sprintf("Diffing %s against %s...", m.domain, against)
 	if p := m.zd.progress; p != nil {
 		if total := p.total.Load(); total > 0 {
 			s += fmt.Sprintf(" Checked %d/%d records", p.done.Load(), total)
@@ -360,12 +469,15 @@ func (m tabModel) renderZoneDiff() string {
 	b.WriteString(resultHeaderStyle.Render("Zone Diff for " + r.Domain))
 	b.WriteString("\n")
 	label := func(s string) string { return zdLabelStyle.Render(fmt.Sprintf("%-12s", s)) }
-	old := strings.Join(r.OldServers, ", ")
-	if m.zd.opts.OldServer == "" {
+	old := r.OldSource()
+	if r.OldFile == "" && m.zd.opts.OldServer == "" {
 		old += zdNoteStyle.Render(" (authoritative)")
 	}
 	fmt.Fprintf(&b, "%s%s\n", label("Old:"), old)
-	fmt.Fprintf(&b, "%s%s\n", label("New:"), r.NewServer)
+	fmt.Fprintf(&b, "%s%s\n", label("New:"), r.NewSource())
+	for _, w := range r.Warnings {
+		fmt.Fprintf(&b, "%s%s\n", label("Warning:"), zdNoteStyle.Render(w))
+	}
 	if r.Enumeration != "" {
 		fmt.Fprintf(&b, "%s%s\n", label("Enumerated:"), r.Enumeration)
 	}

@@ -470,7 +470,7 @@ func (m *tabModel) renderContent() {
 			m.viewport.SetContent(m.renderZoneDiff())
 			return
 		}
-		b.WriteString(resultHeaderStyle.Render(fmt.Sprintf("%s Results for %s%s", m.lookupLabel(), m.domain, m.watchLabel())))
+		b.WriteString(resultHeaderStyle.Render(strings.TrimSpace(fmt.Sprintf("%s Results for %s%s", m.lookupLabel(), m.domain, m.watchLabel()))))
 		b.WriteString("\n")
 		if m.isWatching && !m.lastUpdated.IsZero() {
 			b.WriteString(watchInfoStyle.Render("Last updated " + m.lastUpdated.Format("15:04:05")))

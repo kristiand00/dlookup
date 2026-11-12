@@ -14,7 +14,7 @@ func TestGetComprehensiveReportOrder(t *testing.T) {
 	expectedOrder := []string{
 		"NSLOOKUP", "DIG (A)", "DIG (AAAA)", "DIG (CNAME)", "DIG (MX)",
 		"DIG (NS)", "DIG (SOA)", "DIG (TXT)", "DIG (SPF)", "DIG (DMARC)",
-		"DIG (CAA)", "DIG (PTR)", "RDAP", "WHOIS",
+		"DIG (CAA)", "DIG (PTR)", "Delegation", "DNSSEC", "Email", "RDAP", "WHOIS",
 	}
 	actualOrder := lookup.GetComprehensiveReportOrder()
 	if !reflect.DeepEqual(actualOrder, expectedOrder) {

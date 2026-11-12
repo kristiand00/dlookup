@@ -16,6 +16,8 @@ A terminal application built with Go and Bubble Tea for DNS lookups, RDAP/WHOIS 
 * **Watch mode** — re-run a lookup on an interval; new lines are highlighted (`+`), removed ones listed (`-`), and background tabs that changed get a `●` marker.
 * **Custom DNS server** — per tab in the TUI (`s` / F7) or with `--server`.
 * **Zone diff** — compare a domain's records on its current nameservers against a new DNS server before migrating (`dlookup zonediff` or `D` in the TUI).
+* **Zone files** — import/export/convert BIND, Cloudflare, Route 53 (incl. change batches), Terraform, OctoDNS, DNSControl and CSV; export a live zone (`dlookup zone`).
+* **Health checks** — propagation across 12 public resolvers, delegation, email (SPF/DMARC/DKIM/MTA-STS), subdomain takeover, DNSSEC chain, TTL migration plan.
 * **Headless mode** — `-o text|json` prints results and exits, for scripting and pipelines.
 * **Export & copy** — save one tab or all tabs to a file, or copy the result to the clipboard.
 * **Configurable keybindings** via YAML, with conflict detection.
@@ -132,21 +134,33 @@ In the TUI and in headless mode, the SDIG lookup prints the same lines. EDNS opt
 
 ### Zone diff (DNS migrations)
 
-Check that a new DNS provider serves the same records as the current one before you switch nameservers:
+Check that a new DNS provider serves the same records as the current one before you switch nameservers, or check a provider export against what is actually live:
 
 ```bash
 dlookup zonediff example.com --new ns1.newprovider.com
 dlookup zonediff example.com --new 203.0.113.53 --old ns1.oldprovider.com --names shop,vpn -o json
+# Cloudflare export vs the new Route 53 nameservers, before the NS switch
+dlookup zonediff example.com --old-file cloudflare-export.json --new ns-123.awsdns-45.com
+# Is the live zone what the export says? (e.g. after an import)
+dlookup zonediff example.com --old-file example.com.zone
+# Offline diff of two exports
+dlookup zonediff --old-file cloudflare.json --new-file route53.json
 ```
 
-The old side defaults to the domain's current authoritative nameservers. dlookup tries a zone transfer (AXFR) first. Most servers refuse it, so it then checks the apex, common names (www, mail, autodiscover, `_dmarc`, DKIM selectors, SRV records, a wildcard probe, …), any in-zone names those records point to, and names you add with `--names` / `--names-file`.
+The old side defaults to the domain's current authoritative nameservers. Either side can instead be a **zone file** (a provider export: BIND zone file, Cloudflare JSON, Route 53 JSON, OctoDNS YAML, CSV or dlookup JSON; the format is detected, or set it with `--old-format` / `--new-format`). Every record in a file is checked, so nothing has to be guessed. `--old-file` without `--new` / `--new-file` compares the export with the live zone, and two files are compared fully offline. Route 53 ALIAS records are compared by the addresses their target resolves to. Differences caused by Cloudflare's proxy (proxied records answered with Cloudflare addresses or flattened CNAMEs) are marked `[expected]`, and so are a SOA or apex NS missing from an export, because the provider manages those.
+
+Without files, dlookup tries a zone transfer (AXFR) first. Most servers refuse it, so it then checks the apex, common names (www, mail, autodiscover, `_dmarc`, DKIM selectors, SRV records, a wildcard probe, …), any in-zone names those records point to, and names you add with `--names` / `--names-file`. With files, the names come from the files, plus AXFR from any server side and the common names when you pass `--probe`.
 
 TTLs and the SOA serial are ignored unless you pass `--ttl`. Changes that are normal when switching provider (apex NS, SOA primary NS/contact) are shown as `[expected]` and don't count as differences.
 
 | Flag | Description |
 | --- | --- |
-| `--new SERVER` | New DNS server, IP or hostname (required) |
+| `--new SERVER` | New DNS server, IP or hostname (required unless a zone file is given) |
 | `--old SERVER` | Old server (default: authoritative NS) |
+| `--old-file FILE` / `--new-file FILE` | Use a zone file (provider export) as the old / new side |
+| `--old-format F` / `--new-format F` | Zone file format (default: detected) |
+| `--origin ZONE` | Origin for files that don't name it (default: the domain) |
+| `--probe` | With zone files, also check common names |
 | `--names a,b` / `--names-file FILE` | Extra names to check |
 | `--types A,MX,…` | Record types (default A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, SRV) |
 | `--ttl` | Also compare TTLs |
@@ -154,9 +168,68 @@ TTLs and the SOA serial are ignored unless you pass `--ttl`. Changes that are no
 | `--all` | Also list matching records |
 | `-o text\|json` | Output format |
 
-Exit codes: `0` no differences, `1` differences found, `2` usage error, `3` a server couldn't be queried.
+Exit codes: `0` no differences, `1` differences found, `2` usage error (including an unreadable zone file), `3` a server couldn't be queried.
 
-In the TUI, press `D` / F4, or pick **Zone Diff** in the New lookup dialog's lookup dropdown. Fill in the new server (and optionally the old server, extra names and the TTL/AXFR checkboxes) and press Enter. In the results, `a` shows or hides matching records, and `1`–`5` filter by status (`0` clears). Both are also in the **View** menu. `r` / F5 re-runs, Enter / F3 edits the options, and export/copy work as usual.
+In the TUI, press `D` / F4, or pick **Zone Diff** in the New lookup dialog's lookup dropdown. Choose the **New source** (a server, a zone file, or the live authoritative servers when the old side is a file) and the **Old source** (the authoritative servers, a server, or a zone file). Fill in the server or file path, optionally extra names and the TTL/AXFR/probe checkboxes, and press Enter. In the results, `a` shows or hides matching records, and `1`–`5` filter by status (`0` clears). Both are also in the **View** menu. `r` / F5 re-runs, Enter / F3 edits the options, and export/copy work as usual.
+
+### Zone files: import, export and convert
+
+`dlookup zone` converts DNS zones between provider formats and exports live zones.
+
+```bash
+dlookup zone formats                                  # supported formats
+dlookup zone show example.com.zone                    # normalized table + counts per type
+dlookup zone convert example.com.zone -o changes.json --to route53-change
+dlookup zone convert cloudflare.json -o example.com.zone
+aws route53 list-resource-record-sets --hosted-zone-id Z123 > r53.json
+dlookup zone convert r53.json --to terraform --tf-zone aws_route53_zone.main.zone_id > dns.tf
+dlookup zone export example.com --to octodns -o example.com.yaml [--server ns1.example.com] [--names shop,vpn]
+```
+
+| Format | Read | Write | What it is |
+| --- | --- | --- | --- |
+| `bind` | ✓ | ✓ | RFC 1035 zone file (Cloudflare's dashboard import/export format) |
+| `cloudflare` | ✓ | ✓ | Cloudflare API `dns_records` JSON |
+| `route53` | ✓ | ✓ | `aws route53 list-resource-record-sets` output |
+| `route53-change` | ✓ | ✓ | Change batch for `aws route53 change-resource-record-sets --change-batch file://changes.json` |
+| `terraform` | | ✓ | `aws_route53_record` resources |
+| `terraform-cloudflare` | | ✓ | `cloudflare_dns_record` resources (provider v5) |
+| `octodns` | ✓ | ✓ | OctoDNS YAML |
+| `dnscontrol` | | ✓ | DNSControl `dnsconfig.js` |
+| `csv` | ✓ | ✓ | `name,type,ttl,data,proxied,comment` |
+| `json` | ✓ | ✓ | dlookup's own zone JSON |
+
+Formats are detected from file names and content; `-` reads stdin / writes stdout.
+
+- To move a zone into Cloudflare via the dashboard, convert to `bind` and use *DNS → Records → Import*. Proxied records carry `; cf_tags=cf-proxied:true`.
+- Route 53 alias records are kept as `ALIAS` pseudo-records and become `alias {}` blocks in Terraform; formats that can't express them get a warning.
+- For provider formats (route53-change, terraform, cloudflare, dnscontrol), the apex NS and SOA are left out because the provider manages them; `--keep-apex-ns` keeps them.
+- Records a format can't express are skipped with a warning on stderr.
+- `zone export` uses a zone transfer (AXFR) when the nameserver allows one; otherwise names are probed, so the export may be incomplete — add names with `--names`.
+
+Exit status: 0 success, 1 error, 2 usage error.
+
+In the TUI, the **Zone** menu (alt+z) has *Export zone…* (current tab's domain, choice of format and file), *Convert file…*, *Show zone file…* (opens the normalized records in a new tab) and *Zone diff…*.
+
+### Health checks
+
+Each check prints one verdict per line (`✓` ok, `!` warning, `✗` problem) and a summary. Run them from the lookup dropdown in the TUI, or with `--lookup`:
+
+```bash
+dlookup -o text --lookup email example.com
+dlookup --lookup delegation example.com shop.example.org   # TUI, a tab each
+```
+
+| Lookup | Flag | What it checks |
+| --- | --- | --- |
+| Propagation | `propagation` | Asks 12 public resolvers (Cloudflare, Google, Quad9, OpenDNS, AdGuard, CleanBrowsing, Control D, Level3, Yandex, AliDNS, DNS.SB, Comodo) for the record type given by `--qtype` (default A) and compares each answer and its remaining TTL with the domain's authoritative servers. |
+| Delegation | `delegation` | Parent referral vs. the nameservers' own NS sets, lame delegation (no AA bit), glue for in-zone nameservers, SOA serial consistency, at least 2 nameservers, /24 network diversity, NS names that are CNAMEs, open recursion on authoritative servers. |
+| Email | `email` | MX (incl. null MX), SPF (single record, syntax, ≤10 DNS lookups across nested includes, ≤2 void lookups, `+all`/`?all`, `ptr`), DMARC (policy, pct, rua/ruf, external report authorisation), DKIM keys on common selectors with RSA key size, MTA-STS (TXT + policy file, mode, max_age, MX coverage), TLS-RPT, BIMI. |
+| Takeover | `takeover` | Dangling CNAMEs on ~80 common names, CNAMEs to services prone to subdomain takeover (S3, CloudFront, Azure, Heroku, GitHub Pages, Shopify, Netlify, Vercel, …), and NS delegations to nameservers that don't exist. |
+| DNSSEC | `dnssec-check` | DS at the parent vs. the zone's DNSKEYs, RRSIG validation for DNSKEY and SOA (expiry, warning when close), deprecated algorithms, NSEC vs NSEC3 (iterations > 0 warned per RFC 9276). Unsigned zones are a warning; a DS without a matching DNSKEY is a broken chain. |
+| TTL plan | `ttlplan` | TTLs of the zone's common records, the parent's NS TTL and the negative-caching TTL, and a migration plan: which records to lower to 300 and the earliest safe switch time. |
+
+Delegation, Email and DNSSEC are part of the Report; Propagation, Takeover and TTL plan run on their own (they send many queries). All checks need a domain name. `--server` sets the resolver used for discovery (and adds a row in Propagation). Note that `--dnssec` is SDIG's DO-bit switch; the DNSSEC health check is `--lookup dnssec-check`.
 
 ## Using the TUI
 

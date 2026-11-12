@@ -96,6 +96,7 @@ func buildMenuBar(cfg AppConfig) ui.MenuBar {
 			{Label: "&Watch…", Hotkey: hk(k.WatchToggle, "F6"), Action: actWatch},
 			{Label: "DNS &server…", Hotkey: hk(k.Server, "F7"), Action: actServer},
 		}},
+		{Title: "&Zone", Items: zoneMenuItems(k)},
 		{Title: "&View", Items: view},
 		{Title: "&Options", Items: []ui.MenuItem{
 			{Label: "&Mouse", Action: actMouse, Checked: &mouse},

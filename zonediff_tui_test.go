@@ -39,6 +39,15 @@ func cannedZoneDiff() *lookup.ZoneDiffResult {
 	}
 }
 
+// setZoneDiffSource chooses a source in the open zone diff dialog and lets it
+// show the matching fields.
+func setZoneDiffSource(t *testing.T, m mainModel, key, value string) mainModel {
+	t.Helper()
+	m.dialog.SetValue(key, value)
+	m.syncZoneDiffDialog()
+	return m
+}
+
 // runZoneDiffDialog opens the zone diff dialog with D on the active tab and
 // submits it with values.
 func runZoneDiffDialog(t *testing.T, m mainModel, values map[string]string) (mainModel, []tea.Msg) {
@@ -71,7 +80,7 @@ func TestZoneDiffDialogFromKeyAndHome(t *testing.T) {
 	if m.dialog.Value("domain") != "example.com" || m.dialog.Focused() != "new" {
 		t.Fatalf("prefill: domain=%q focus=%q", m.dialog.Value("domain"), m.dialog.Focused())
 	}
-	if v := m.View(); !strings.Contains(v, "Zone diff") || !strings.Contains(v, "authoritative NS (auto)") {
+	if v := m.View(); !strings.Contains(v, "Zone diff") || !strings.Contains(v, "Authoritative servers (auto)") {
 		t.Fatalf("dialog not rendered:\n%s", v)
 	}
 	// Printable global keys are typed into the dialog.
@@ -119,6 +128,11 @@ func TestZoneDiffValidation(t *testing.T) {
 	if !strings.Contains(m.View(), "new server") {
 		t.Fatal("validation error should be shown")
 	}
+	m = setZoneDiffSource(t, m, "oldsrc", zdSrcServer)
+	m, _ = submit(t, m, map[string]string{"new": "1.2.3.4", "old": ""})
+	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "old server is required") {
+		t.Fatalf("empty old server: err=%q", m.dialog.Err)
+	}
 	m, _ = submit(t, m, map[string]string{"new": "1.2.3.4", "old": "nope nope"})
 	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "old server") {
 		t.Fatalf("bad old server: err=%q", m.dialog.Err)
@@ -151,7 +165,10 @@ func TestZoneDiffRunProgressAndResult(t *testing.T) {
 	})
 	m := startedModel(t, "example.com")
 	m, _ = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 60})
-	m, _ = typeKeys(t, m, "D", "192.0.2.53", "tab", "ns1.old.test", "tab", "www,mail", "tab")
+	m, _ = typeKeys(t, m, "D", "192.0.2.53")
+	m = setZoneDiffSource(t, m, "oldsrc", zdSrcServer)
+	m.dialog.FocusField("old")
+	m, _ = typeKeys(t, m, "ns1.old.test", "tab", "www,mail", "tab")
 	if m.dialog.Focused() != "ttl" || m.dialog.Value("ttl") != "false" || m.dialog.Value("axfr") != "true" {
 		t.Fatalf("focus=%q ttl=%q axfr=%q", m.dialog.Focused(), m.dialog.Value("ttl"), m.dialog.Value("axfr"))
 	}
@@ -451,5 +468,112 @@ func TestZoneDiffKeybindings(t *testing.T) {
 	m, _ = typeKeys(t, m, "m")
 	if !m.tabs[0].zd.showMatches {
 		t.Fatal("custom toggle_matches key should work")
+	}
+}
+
+func TestZoneDiffDialogZoneFileSource(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "export.zone")
+	if err := os.WriteFile(good, []byte("$ORIGIN example.com.\n$TTL 300\n@ IN A 192.0.2.1\nwww IN A 192.0.2.2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(dir, "broken.zone")
+	if err := os.WriteFile(broken, []byte("@ IN A not-an-address\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got lookup.ZoneDiffOptions
+	var called atomic.Int32
+	stubDiffZone(t, func(ctx context.Context, o lookup.ZoneDiffOptions) (*lookup.ZoneDiffResult, error) {
+		got = o
+		called.Add(1)
+		r := cannedZoneDiff()
+		r.OldServers, r.OldFile = nil, o.OldZoneLabel
+		r.NewServers = []string{"192.0.2.53:53", "192.0.2.54:53"}
+		r.NewServer = "192.0.2.53:53"
+		r.Warnings = []string{"old zone file: ignored 1 record(s) outside example.com."}
+		return r, nil
+	})
+	m := startedModel(t, "example.com")
+	m, _ = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 60})
+	m, _ = typeKeys(t, m, "D")
+	expectDialog(t, m, dlgZoneDiff)
+	if hasField(m, "old") || hasField(m, "oldfile") || hasField(m, "probe") || !hasField(m, "new") {
+		t.Fatalf("default fields: %+v", m.dialog.Fields)
+	}
+	m = setZoneDiffSource(t, m, "oldsrc", zdSrcFile)
+	if !hasField(m, "oldfile") || hasField(m, "old") || !hasField(m, "probe") {
+		t.Fatalf("file fields: %+v", m.dialog.Fields)
+	}
+	if !strings.Contains(m.View(), "Old zone file") {
+		t.Fatal("old zone file field not rendered")
+	}
+	m = setZoneDiffSource(t, m, "newsrc", zdSrcAuth)
+	if hasField(m, "new") || hasField(m, "newfile") {
+		t.Fatalf("live new side should have no server/file field: %+v", m.dialog.Fields)
+	}
+
+	// Validation: missing path, missing file, unparseable file.
+	m, _ = submit(t, m, nil)
+	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "old zone file: enter a file path") {
+		t.Fatalf("empty path: err=%q", m.dialog.Err)
+	}
+	m, _ = submit(t, m, map[string]string{"oldfile": filepath.Join(dir, "missing.zone")})
+	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "old zone file") || !strings.Contains(m.dialog.Err, "no such file") {
+		t.Fatalf("missing file: err=%q", m.dialog.Err)
+	}
+	m, _ = submit(t, m, map[string]string{"oldfile": broken})
+	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "old zone file") {
+		t.Fatalf("broken file: err=%q", m.dialog.Err)
+	}
+	if called.Load() != 0 {
+		t.Fatal("invalid form must not run a diff")
+	}
+
+	// Valid: file vs live authoritative, domain may be left empty.
+	m, msgs := submit(t, m, map[string]string{"oldfile": good, "domain": "", "probe": "true"})
+	if m.dlg != dlgNone {
+		t.Fatalf("dialog still open: err=%q", m.dialog.Err)
+	}
+	if !strings.Contains(m.tabs[0].loadingMsg, "the live zone") {
+		t.Errorf("loading msg = %q", m.tabs[0].loadingMsg)
+	}
+	m, _ = settle(t, m, msgs)
+	if got.Domain != "example.com" || got.OldZone == nil || got.OldZoneLabel != good || got.NewServer != "" || got.NewZone != nil || !got.Probe {
+		t.Fatalf("options = %+v", got)
+	}
+	if len(got.OldZone.Lookup("www", "A")) != 1 {
+		t.Errorf("parsed zone = %+v", got.OldZone)
+	}
+	content := m.tabs[0].viewport.View()
+	for _, want := range []string{"zone file " + good, "live authoritative", "Warning:", "outside example.com."} {
+		if !strings.Contains(content, want) {
+			t.Errorf("results missing %q:\n%s", want, content)
+		}
+	}
+
+	// The sources and path are remembered for the next dialog on this tab.
+	m, _ = typeKeys(t, m, "D")
+	expectDialog(t, m, dlgZoneDiff)
+	if m.dialog.Value("oldsrc") != zdSrcFile || m.dialog.Value("oldfile") != good || m.dialog.Value("newsrc") != zdSrcAuth || m.dialog.Value("probe") != "true" {
+		t.Fatalf("remembered: %v", m.dialog.Values())
+	}
+
+	// New side as a file too; live new side needs an old file.
+	m = setZoneDiffSource(t, m, "newsrc", zdSrcFile)
+	if m.dialog.Focused() == "" || !hasField(m, "newfile") {
+		t.Fatalf("new file field: %+v", m.dialog.Fields)
+	}
+	m, msgs = submit(t, m, map[string]string{"newfile": good})
+	m, _ = settle(t, m, msgs)
+	if got.NewZone == nil || got.NewZoneLabel != good || got.OldZone == nil {
+		t.Fatalf("file vs file options = %+v", got)
+	}
+	m, _ = typeKeys(t, m, "D")
+	m = setZoneDiffSource(t, m, "oldsrc", zdSrcAuth)
+	m = setZoneDiffSource(t, m, "newsrc", zdSrcAuth)
+	m, _ = submit(t, m, nil)
+	if m.dlg != dlgZoneDiff || !strings.Contains(m.dialog.Err, "need an old zone file") {
+		t.Fatalf("auth vs auth: err=%q", m.dialog.Err)
 	}
 }
