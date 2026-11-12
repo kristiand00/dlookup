@@ -330,6 +330,9 @@ func (m *mainModel) updateDialog(msg tea.Msg) tea.Cmd {
 	}
 	d, res, cmd := m.dialog.Update(msg)
 	m.dialog = d
+	if m.dlg == dlgTheme && (res == nil || res.Action == ui.ActionCancel) {
+		m.previewTheme(res != nil)
+	}
 	if res == nil {
 		// Choosing Zone diff in the lookup dialog swaps to the zone diff dialog.
 		if m.dlg == dlgLookup && m.dialog.Value("type") == zoneDiffName {

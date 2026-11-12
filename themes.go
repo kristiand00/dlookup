@@ -95,13 +95,32 @@ func (m *mainModel) openThemeDialog() tea.Cmd {
 		{Label: "&Cancel", Action: btnCancel},
 	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(56)
-	d.Help = "Saved to the config file (theme: …)."
+	d.Help = "↑↓ previews · Apply saves (theme: …) · Esc reverts"
+	m.themeBefore = currentThemeName()
 	return m.openDialog(dlgTheme, -1, d)
+}
+
+// previewTheme shows the theme highlighted in the open theme dropdown (or the
+// field's current value) without saving it; revert restores the theme that was
+// active when the dialog opened.
+func (m *mainModel) previewTheme(revert bool) {
+	name := m.dialog.Value("theme")
+	if key, v, ok := m.dialog.Highlighted(); ok && key == "theme" {
+		name = v
+	}
+	if revert {
+		name = m.themeBefore
+	}
+	if name == "" || name == currentThemeName() {
+		return
+	}
+	_ = m.applyTheme(name)
 }
 
 // submitThemeDialog applies and saves the chosen theme.
 func (m *mainModel) submitThemeDialog(res ui.DialogResult) tea.Cmd {
 	if res.Action != btnApply {
+		m.previewTheme(true)
 		m.closeDialog()
 		return nil
 	}

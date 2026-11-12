@@ -196,6 +196,21 @@ func (d Dialog) Focused() string {
 // DropdownOpen reports whether a select dropdown is open.
 func (d Dialog) DropdownOpen() bool { return d.ddOpen }
 
+// Highlighted returns the key of the select field whose dropdown is open and
+// the value of its highlighted option (ok is false when no dropdown is open).
+// Callers can use it to preview a choice before it is made.
+func (d Dialog) Highlighted() (key, value string, ok bool) {
+	if !d.ddOpen {
+		return "", "", false
+	}
+	opts := d.filtered(d.ddField)
+	if d.ddSel < 0 || d.ddSel >= len(opts) {
+		return "", "", false
+	}
+	f := d.Fields[d.ddField]
+	return f.Key, f.Options[opts[d.ddSel]].Value, true
+}
+
 // SetValue sets a field's value (checkbox: "true"/"false"; select: option Value).
 func (d *Dialog) SetValue(key, value string) {
 	i := d.fieldIndex(key)

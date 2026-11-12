@@ -15,6 +15,7 @@ import (
 const chromeRows = 4
 
 type mainModel struct {
+	themeBefore string // theme active when the theme dialog opened, restored on cancel
 	tabs        []tabModel
 	activeTab   int
 	width       int

@@ -262,3 +262,41 @@ func TestHomeListsThemes(t *testing.T) {
 		}
 	}
 }
+
+func TestThemeDialogPreview(t *testing.T) {
+	themeTest(t)
+	tempConfigHome(t)
+	m := homeModel(t, DefaultConfig())
+	second := ui.Themes()[1]
+
+	// Moving through the open dropdown previews each theme.
+	m.openThemeDialog()
+	m, _ = typeKeys(t, m, "space")
+	before := m.View()
+	m, _ = typeKeys(t, m, "down")
+	if currentThemeName() != second || m.config.Theme == second {
+		t.Fatalf("preview: active %q, config %q", currentThemeName(), m.config.Theme)
+	}
+	if m.View() == before {
+		t.Error("screen not redrawn in the previewed theme")
+	}
+	// Esc on the dropdown goes back to the field's value; Esc again cancels.
+	m, _ = typeKeys(t, m, "esc")
+	if currentThemeName() != "mc" || m.dlg != dlgTheme {
+		t.Fatalf("after closing dropdown: active %q dlg %v", currentThemeName(), m.dlg)
+	}
+	m, _ = typeKeys(t, m, "space", "down", "enter", "esc")
+	if currentThemeName() != "mc" || m.dlg != dlgNone {
+		t.Fatalf("cancel did not revert: active %q dlg %v", currentThemeName(), m.dlg)
+	}
+
+	// Choosing and applying keeps and saves the previewed theme.
+	m.openThemeDialog()
+	m, _ = typeKeys(t, m, "space", "down", "enter", "enter")
+	if currentThemeName() != second || m.config.Theme != second || m.dlg != dlgNone {
+		t.Fatalf("apply: active %q config %q dlg %v", currentThemeName(), m.config.Theme, m.dlg)
+	}
+	if got, err := loadConfig(); err != nil || got.Theme != second {
+		t.Errorf("saved theme %q, %v", got.Theme, err)
+	}
+}
