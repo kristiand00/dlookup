@@ -281,10 +281,14 @@ func TestStartsOnHomeWithoutFocusedInput(t *testing.T) {
 		t.Fatalf("expected Home tab without dialog: tabs=%d dlg=%v", len(m.tabs), m.dlg)
 	}
 	v := m.View()
-	for _, want := range []string{"Get started", "[ New lookup ]", "[ Zone diff ]", "Keyboard shortcuts", "Lookup", "1Help", "10Quit"} {
+	for _, want := range []string{"Get started", "[ New lookup ]", "[ Zone diff ]", "Lookup", "1Help", "10Quit"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("home view missing %q", want)
 		}
+	}
+	// The shortcut table is further down the scrollable Home content.
+	if !strings.Contains(helpContent(m.config, 100), "Keyboard shortcuts") {
+		t.Error("home content missing \"Keyboard shortcuts\"")
 	}
 	// Global letter keys work right away; x can't close the only Home tab.
 	m, _ = typeKeys(t, m, "x")
@@ -385,23 +389,6 @@ func TestChangeLookupReusesTab(t *testing.T) {
 	// F3 opens the same dialog.
 	m, _ = typeKeys(t, m, "f3")
 	expectDialog(t, m, dlgLookup)
-}
-
-func TestTargetsWithoutLookupOpenDialog(t *testing.T) {
-	tuiFake.reset()
-	m := newMainModel([]string{"a.test", "b.test"}, "", DefaultConfig(), lookup.Options{})
-	if len(m.tabs) != 2 || m.tabs[0].isHome() {
-		t.Fatal("targets should open lookup tabs, no Home")
-	}
-	expectDialog(t, m, dlgLookup)
-	if m.dialog.Value("domain") != "a.test" {
-		t.Fatalf("domain=%q", m.dialog.Value("domain"))
-	}
-	m, msgs := submit(t, m, map[string]string{"type": tuiFakeName})
-	m, _ = settle(t, m, msgs)
-	if len(m.tabs) != 2 || m.tabs[0].state != stateViewResults {
-		t.Fatalf("tabs=%d state=%v", len(m.tabs), m.tabs[0].state)
-	}
 }
 
 func TestFKeysAndMenuDispatch(t *testing.T) {

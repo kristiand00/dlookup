@@ -3,64 +3,118 @@ package main
 import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"dlookup/ui"
 )
 
+// App-level styles. They are (re)built from the active theme's palette by
+// applyAppStyles; never give them literal colours.
 var (
-	colorLightBlue = lipgloss.Color("81")
-	colorGrey      = lipgloss.Color("240")
-	colorLightGrey = lipgloss.Color("244")
-	colorYellow    = lipgloss.Color("221")
-	colorBlack     = lipgloss.Color("16")
-	colorRed       = lipgloss.Color("196")
-	colorOrange    = lipgloss.Color("214")
-	colorGreen     = lipgloss.Color("78")
-	colorHelpKey   = lipgloss.Color("81")
-	colorHelpDesc  = lipgloss.Color("241")
-	colorCyan      = lipgloss.Color("45")
+	resultHeaderStyle lipgloss.Style
 
-	resultHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(colorLightBlue).
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorGrey).
-				Padding(0, 1).
-				Margin(0, 0, 1, 0)
+	errorStyle   lipgloss.Style
+	loadingStyle lipgloss.Style
 
-	errorStyle   = lipgloss.NewStyle().Foreground(colorRed)
-	loadingStyle = lipgloss.NewStyle().Foreground(colorOrange).Padding(1, 1)
-
-	helpKeyStyle  = lipgloss.NewStyle().Foreground(colorHelpKey)
-	helpDescStyle = lipgloss.NewStyle().Foreground(colorHelpDesc)
+	helpKeyStyle  lipgloss.Style
+	helpDescStyle lipgloss.Style
 
 	// Panel (the active tab's bordered box).
-	panelBorderStyle = lipgloss.NewStyle().Foreground(colorCyan)
-	panelTitleStyle  = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
-	scrollTrackStyle = lipgloss.NewStyle().Foreground(colorGrey)
-	scrollThumbStyle = lipgloss.NewStyle().Foreground(colorCyan)
+	panelBorderStyle lipgloss.Style
+	panelTitleStyle  lipgloss.Style
+	scrollTrackStyle lipgloss.Style
+	scrollThumbStyle lipgloss.Style
 
 	// Home / help screen.
-	homeTitleStyle   = lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
-	homeSectionStyle = lipgloss.NewStyle().Foreground(colorYellow).Bold(true)
-	homeButtonStyle  = lipgloss.NewStyle().Foreground(colorBlack).Background(colorCyan).Bold(true)
+	homeTitleStyle   lipgloss.Style
+	homeSectionStyle lipgloss.Style
+	homeButtonStyle  lipgloss.Style
 
-	hintStyle = lipgloss.NewStyle().Foreground(colorHelpDesc).Padding(0, 1)
+	hintStyle lipgloss.Style
 
-	diffAddStyle    = lipgloss.NewStyle().Foreground(colorGreen)
-	diffRemoveStyle = lipgloss.NewStyle().Foreground(colorRed)
-	watchInfoStyle  = lipgloss.NewStyle().Foreground(colorOrange)
-	statusStyle     = lipgloss.NewStyle().Foreground(colorGreen).Padding(0, 1)
+	diffAddStyle    lipgloss.Style
+	diffRemoveStyle lipgloss.Style
+	watchInfoStyle  lipgloss.Style
+	statusStyle     lipgloss.Style
 
 	// Zone diff.
-	zdMatchStyle   = lipgloss.NewStyle().Foreground(colorGreen)
-	zdChangedStyle = lipgloss.NewStyle().Foreground(colorOrange)
-	zdMissingStyle = lipgloss.NewStyle().Foreground(colorRed)
-	zdExtraStyle   = lipgloss.NewStyle().Foreground(colorCyan)
-	zdErrorStyle   = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
-	zdNoteStyle    = lipgloss.NewStyle().Foreground(colorGrey).Faint(true)
-	zdLabelStyle   = lipgloss.NewStyle().Foreground(colorLightGrey)
-	zdBannerStyle  = lipgloss.NewStyle().Foreground(colorGreen).Bold(true).
-			Border(lipgloss.RoundedBorder()).BorderForeground(colorGreen).Padding(0, 1)
+	zdMatchStyle   lipgloss.Style
+	zdChangedStyle lipgloss.Style
+	zdMissingStyle lipgloss.Style
+	zdExtraStyle   lipgloss.Style
+	zdErrorStyle   lipgloss.Style
+	zdNoteStyle    lipgloss.Style
+	zdLabelStyle   lipgloss.Style
+	zdBannerStyle  lipgloss.Style
 )
+
+func init() {
+	_, p, _ := ui.ThemeByName(ui.DefaultThemeName)
+	applyAppStyles(p)
+}
+
+// applyAppStyles rebuilds the app-level style globals from palette p.
+func applyAppStyles(p ui.Palette) {
+	fg := func(c lipgloss.TerminalColor) lipgloss.Style {
+		s := lipgloss.NewStyle()
+		if c != nil {
+			s = s.Foreground(c)
+		}
+		return s
+	}
+	borderFg := func(s lipgloss.Style, c lipgloss.TerminalColor) lipgloss.Style {
+		if c != nil {
+			s = s.BorderForeground(c)
+		}
+		return s
+	}
+
+	resultHeaderStyle = borderFg(fg(p.Primary).
+		Bold(true).
+		Border(lipgloss.RoundedBorder()), p.Border).
+		Padding(0, 1).
+		Margin(0, 0, 1, 0)
+
+	errorStyle = fg(p.Error)
+	loadingStyle = fg(p.Warning).Padding(1, 1)
+
+	helpKeyStyle = fg(p.Primary)
+	helpDescStyle = fg(p.TextMuted)
+
+	panelBorderStyle = fg(p.BorderActive)
+	panelTitleStyle = fg(p.Accent).Bold(true)
+	scrollTrackStyle = fg(p.Border)
+	scrollThumbStyle = fg(p.BorderActive)
+
+	homeTitleStyle = fg(p.Title).Bold(true)
+	homeSectionStyle = fg(p.Accent).Bold(true)
+	homeButtonStyle = fg(p.ButtonFg).Bold(true)
+	if p.ButtonBg != nil {
+		homeButtonStyle = homeButtonStyle.Background(p.ButtonBg)
+	}
+	if p.Reverse {
+		homeButtonStyle = lipgloss.NewStyle().Reverse(true).Bold(true)
+	}
+
+	hintStyle = fg(p.TextMuted).Padding(0, 1)
+
+	diffAddStyle = fg(p.DiffAdd)
+	diffRemoveStyle = fg(p.DiffRemove)
+	watchInfoStyle = fg(p.Warning)
+	statusStyle = fg(p.Success).Padding(0, 1)
+
+	zdMatchStyle = fg(p.Success)
+	zdChangedStyle = fg(p.Warning)
+	zdMissingStyle = fg(p.Error)
+	zdExtraStyle = fg(p.Info)
+	zdErrorStyle = fg(p.Error).Bold(true)
+	zdNoteStyle = fg(p.TextFaint)
+	if p.Background == nil {
+		zdNoteStyle = zdNoteStyle.Faint(true) // too dim on a painted background
+	}
+	zdLabelStyle = fg(p.TextSubtle)
+	zdBannerStyle = borderFg(fg(p.Success).Bold(true).
+		Border(lipgloss.RoundedBorder()), p.Success).Padding(0, 1)
+}
 
 // truncateWidth shortens s to at most width terminal cells (grapheme and
 // wide-character aware, ANSI-safe), ending with "…" when it was cut.

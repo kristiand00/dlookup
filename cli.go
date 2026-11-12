@@ -83,14 +83,25 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 		lookupName string
 		server     string
 		timeout    time.Duration
+		qtype      string
+		recurse    bool
+		norecurse  bool
+		sdigOpts   lookup.Options
 	)
 	fs.BoolVar(&cfg.ShowVersion, "version", false, "Print version and exit")
 	fs.StringVar(&output, "output", "", "Headless mode: print results as `format` (text|json) to stdout and exit")
 	fs.StringVar(&output, "o", "", "Shorthand for --output `format`")
-	fs.StringVar(&lookupName, "lookup", "", "Select lookup `type` by flag name (e.g. dig-mx) for positional targets")
+	fs.StringVar(&lookupName, "lookup", "", "Select lookup `type` by flag name (e.g. dig-mx) for positional targets (default sdig)")
 	fs.StringVar(&server, "server", "", "DNS `server` to query, e.g. 1.1.1.1 or 1.1.1.1:53 (default: system resolver)")
 	fs.DurationVar(&timeout, "timeout", 0, fmt.Sprintf("Per-lookup `timeout`, e.g. 5s (default %s)", lookup.DefaultTimeout))
 	fs.IntVar(&cfg.Concurrency, "concurrency", defaultConcurrency, "Headless mode: max lookups run in `parallel`")
+	fs.StringVar(&qtype, "qtype", "", "SDIG query `type`, e.g. MX (default A; PTR for IP targets)")
+	fs.StringVar(&qtype, "t", "", "Shorthand for --qtype `type`")
+	fs.BoolVar(&sdigOpts.DNSSEC, "dnssec", false, "SDIG: set the DNSSEC OK (DO) bit")
+	fs.BoolVar(&sdigOpts.TCP, "tcp", false, "SDIG: query over TCP")
+	fs.BoolVar(&recurse, "recurse", true, "SDIG: set the Recursion Desired (RD) bit; --recurse=false clears it")
+	fs.BoolVar(&norecurse, "norecurse", false, "SDIG: clear the RD bit (same as --recurse=false)")
+	fs.BoolVar(&sdigOpts.HideTTL, "hidettl", false, "SDIG: print [ttl] instead of TTLs")
 
 	providers := sortedProviders()
 	fileFlags := make(map[string]*string, len(providers))
@@ -126,7 +137,20 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 	if timeout < 0 {
 		return nil, usageErr("--timeout must not be negative")
 	}
-	cfg.Opts = lookup.Options{Server: server, Timeout: timeout}
+	if qtype != "" {
+		if _, err := lookup.ParseQType(qtype); err != nil {
+			return nil, usageErr("invalid --qtype %q: %v", qtype, err)
+		}
+	}
+	cfg.Opts = lookup.Options{
+		Server:    server,
+		Timeout:   timeout,
+		QType:     strings.ToUpper(qtype),
+		NoRecurse: !recurse || norecurse,
+		DNSSEC:    sdigOpts.DNSSEC,
+		TCP:       sdigOpts.TCP,
+		HideTTL:   sdigOpts.HideTTL,
+	}
 
 	// Select the provider: at most one file flag, optionally consistent with --lookup.
 	var fileFlagName, filename string
@@ -150,6 +174,33 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 			return nil, usageErr("--lookup %s conflicts with --%s", lookupName, fileFlagName)
 		}
 		cfg.Provider = p
+	}
+	// SDIG-only options (anything but the query type) without an explicit
+	// lookup select SDIG instead of the default Overview.
+	if cfg.Provider == nil {
+		sdigOnly := false
+		fs.Visit(func(f *flag.Flag) {
+			if sdigFlags[f.Name] && f.Name != "qtype" && f.Name != "t" {
+				sdigOnly = true
+			}
+		})
+		if p, ok := lookup.GetProvider(lookup.SDIGName); ok && sdigOnly {
+			cfg.Provider = p
+		}
+	}
+	// SDIG options only make sense with the SDIG lookup.
+	if cfg.Provider != nil && cfg.Provider.Name() != lookup.SDIGName {
+		var set []string
+		fs.Visit(func(f *flag.Flag) {
+			// Overview also takes the query type.
+			overviewQType := cfg.Provider.Name() == lookup.OverviewName && (f.Name == "qtype" || f.Name == "t")
+			if sdigFlags[f.Name] && !overviewQType {
+				set = append(set, "--"+f.Name)
+			}
+		})
+		if len(set) > 0 {
+			return nil, usageErr("%s only apply to the sdig lookup (selected: %s)", strings.Join(set, ", "), cfg.Provider.FlagName())
+		}
 	}
 
 	// Collect targets: file (or stdin) first, then positional args.
@@ -195,7 +246,11 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 
 	if cfg.Headless() {
 		if cfg.Provider == nil {
-			return nil, usageErr("--output requires a lookup type (e.g. --lookup dig-a or --dig-a FILE)")
+			p, ok := lookup.GetProvider(lookup.DefaultLookupName)
+			if !ok {
+				return nil, usageErr("--output requires a lookup type (e.g. --lookup dig-a or --dig-a FILE)")
+			}
+			cfg.Provider = p
 		}
 		if len(cfg.Targets) == 0 {
 			return nil, usageErr("no valid targets given")
@@ -203,6 +258,9 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 	}
 	return cfg, nil
 }
+
+// sdigFlags are the flags that set SDIG-only options.
+var sdigFlags = map[string]bool{"qtype": true, "t": true, "dnssec": true, "tcp": true, "recurse": true, "norecurse": true, "hidettl": true}
 
 // parseInterspersed parses fs from args, allowing positional args between flags.
 // Everything after a literal "--" is positional.
@@ -261,10 +319,15 @@ func printUsage(fs *flag.FlagSet, providers []lookup.LookupProvider) {
 Usage:
   dlookup [options] [target ...]
   dlookup [options] --<lookup> FILE [target ...]
-  dlookup -o text|json --lookup <lookup> [options] target ...
+  dlookup -o text|json [--lookup <lookup>] [options] target ...
+  dlookup sdig IP PORT QNAME QTYPE [option ...]       (PowerDNS sdig-compatible)
   dlookup zonediff <domain> --new <server> [options]   (see 'dlookup zonediff --help')
 
 Without --output, dlookup starts the interactive TUI with one tab per target.
+The default lookup is Overview (IP + TTL, PTR, MX, NS). SDIG: one query (--qtype, default A; PTR for IP
+targets) printed like PowerDNS's sdig, with the RD bit set (unlike sdig) so
+the system resolver answers recursively. Targets given without a lookup type
+run SDIG right away.
 With --output, it runs the lookup on every target, prints the results in
 input order to stdout and exits (exit code 1 if any lookup failed, 2 on usage
 errors). FILE contains one target per line; blank lines and '#' comments are
@@ -290,12 +353,23 @@ Options:
 	fmt.Fprint(w, `
 Examples:
   dlookup                                   start the TUI
-  dlookup example.com 1.1.1.1               open a tab per target, choose the lookup in the TUI
+  dlookup example.com 1.1.1.1               open a tab per target running SDIG (A / PTR)
+  dlookup -t MX --dnssec example.com        SDIG MX with the DO bit
+  dlookup -o text example.com               SDIG A, printed to stdout
   dlookup --dig-a domains.txt extra.com     run DIG (A) in the TUI on the file's targets plus extra.com
   dlookup -o json --lookup dig-mx example.com
   cat domains.txt | dlookup -o text --lookup whois -
   dlookup -o text --dig-a domains.txt --server 1.1.1.1 --timeout 5s --concurrency 4
   dlookup zonediff example.com --new ns1.newprovider.net   compare records before an NS switch
+  dlookup sdig 1.1.1.1 53 example.com A recurse dnssec    exactly like PowerDNS sdig
+
+sdig-compatible mode (dlookup sdig):
+  Arguments as for sdig: IP (optionally @IP) or https:// DoH URL, PORT, QNAME,
+  QTYPE, then in any order: recurse dnssec tcp dot insecure hidettl
+  hidesoadetails showflags fastOpen, ednssubnet SUBNET, class N, opcode N,
+  cookie -/HEX, subjectName NAME, caStore FILE, tlsProvider NAME.
+  As in sdig, RD is off unless "recurse" is given. Records go to stdout, EDNS
+  option lines to stderr. proxy, dumpluaraw, traceid and stdin are not supported.
 `)
 }
 

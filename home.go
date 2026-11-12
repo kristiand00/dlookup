@@ -113,6 +113,8 @@ func helpContent(cfg AppConfig, width int) string {
 	}
 	sort.Strings(names)
 	features := []string{
+		"Overview (default): where a domain resolves + TTL, PTR of each IP, MX and NS at a glance",
+		"SDIG: one query of any type printed like PowerDNS sdig (dlookup sdig IP PORT NAME TYPE ...)",
 		"Native DNS lookups (no dig needed): A, AAAA, CNAME, MX, NS, SOA, TXT, CAA, PTR, SPF, DMARC, ANY",
 		"RDAP registration data over HTTPS; NSLOOKUP and WHOIS via the system tools",
 		"Comprehensive Report: every lookup for a target in one view",
@@ -151,11 +153,20 @@ func helpContent(cfg AppConfig, width int) string {
 	line("  To select text, hold Shift (Option on macOS Terminal/iTerm) while dragging,")
 	line("  or turn the mouse off in Options → Mouse.")
 
+	section("Themes")
+	line(fmt.Sprintf("  Options → Theme… switches the colour theme (now: %s); it is saved", key(currentThemeName())))
+	line("  as `theme: <name>` in the config file. Available:")
+	themes := ansi.Wrap(strings.Join(ui.Themes(), ", "), max(20, width-4), "")
+	for _, l := range strings.Split(themes, "\n") {
+		line(helpDescStyle.Render("  " + l))
+	}
+
 	section("Command line")
-	line("  dlookup example.com 1.1.1.1            a tab per target")
+	line("  dlookup example.com 1.1.1.1            a tab per target (Overview)")
 	line("  dlookup --dig-mx domains.txt           run a lookup on every target")
 	line("  dlookup -o json --lookup rdap a.com    headless output (text or json)")
 	line("  dlookup zonediff example.com --new ns1.newprovider.com")
+	line("  dlookup sdig 1.1.1.1 53 example.com A recurse")
 	line("  dlookup --help                         all options")
 
 	section("Configuration")
@@ -164,6 +175,6 @@ func helpContent(cfg AppConfig, width int) string {
 		path = "~/.config/dlookup/config.yaml"
 	}
 	line("  " + path)
-	line("  Keybindings and `mouse: true|false` can be changed there.")
+	line("  Keybindings, `mouse: true|false` and `theme: <name>` can be changed there.")
 	return strings.TrimRight(b.String(), "\n")
 }

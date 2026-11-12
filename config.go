@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"dlookup/ui"
 )
 
 // Keybindings defines the configurable key actions.
@@ -65,7 +67,10 @@ type AppConfig struct {
 	// scrolling). It can be toggled at runtime in the Options menu; while it is
 	// on, hold Shift (Option on macOS) to select text with the terminal.
 	// Configs that predate this setting get the default (true).
-	Mouse       bool        `yaml:"mouse"`
+	Mouse bool `yaml:"mouse"`
+	// Theme is the colour theme (see ui.Themes); it can be changed at runtime
+	// in Options → Theme…. Unknown names fall back to "mc" with a warning.
+	Theme       string      `yaml:"theme"`
 	Keybindings Keybindings `yaml:"keybindings"`
 }
 
@@ -173,6 +178,7 @@ func sanitizeKeybindings(k Keybindings) (Keybindings, error) {
 func DefaultConfig() AppConfig {
 	return AppConfig{
 		Mouse:       true,
+		Theme:       ui.DefaultThemeName,
 		Keybindings: DefaultKeybindings(),
 	}
 }
@@ -225,6 +231,9 @@ func loadConfig() (AppConfig, error) {
 			// If parsing fails, maybe log a warning and return defaults?
 			// Or return the error and let main handle it.
 			return config, fmt.Errorf("error parsing config file %s: %w", configPath, err)
+		}
+		if strings.TrimSpace(config.Theme) == "" {
+			config.Theme = ui.DefaultThemeName // configs that predate themes
 		}
 		fixed, verr := sanitizeKeybindings(config.Keybindings)
 		config.Keybindings = fixed

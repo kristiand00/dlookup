@@ -220,9 +220,9 @@ func CenterPos(fg string, width, height int) (x, y int) {
 
 // OverlayShadow is Overlay plus an MC-style drop shadow: two cells to the
 // right and one row below fg, which re-draws the covered background text in
-// dark grey on black.
+// the active theme's shadow style.
 func OverlayShadow(bg, fg string, x, y int) string {
-	return OverlayShadowStyle(bg, fg, x, y, DefaultTheme().Shadow)
+	return OverlayShadowStyle(bg, fg, x, y, ActiveTheme().Shadow)
 }
 
 // OverlayShadowStyle is OverlayShadow with a custom shadow style.

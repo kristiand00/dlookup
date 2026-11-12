@@ -42,7 +42,7 @@ func runHeadless(ctx context.Context, w io.Writer, provider lookup.LookupProvide
 		defer wg.Done()
 		sem := make(chan struct{}, concurrency)
 		for i, target := range targets {
-			res := headlessResult{Target: target, Lookup: provider.Name()}
+			res := headlessResult{Target: target, Lookup: lookupLabel(provider.Name(), target, opts)}
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():

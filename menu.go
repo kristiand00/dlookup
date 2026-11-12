@@ -29,6 +29,7 @@ const (
 	actTop        = "top"
 	actBottom     = "bottom"
 	actMouse      = "mouse"
+	actTheme      = "theme"
 	actConfigInfo = "config"
 	actAbout      = "about"
 )
@@ -98,6 +99,7 @@ func buildMenuBar(cfg AppConfig) ui.MenuBar {
 		{Title: "&View", Items: view},
 		{Title: "&Options", Items: []ui.MenuItem{
 			{Label: "&Mouse", Action: actMouse, Checked: &mouse},
+			{Label: "&Theme…", Action: actTheme},
 			{Label: "&Config file…", Action: actConfigInfo},
 		}},
 		{Title: "&Help", Items: []ui.MenuItem{
@@ -105,7 +107,7 @@ func buildMenuBar(cfg AppConfig) ui.MenuBar {
 			{Label: "&About", Action: actAbout},
 		}},
 	}
-	return ui.NewMenuBar("dl-menu", menus, ui.DefaultTheme())
+	return ui.NewMenuBar("dl-menu", menus, ui.ActiveTheme())
 }
 
 // fkeyDefs is the MC-style function key bar.

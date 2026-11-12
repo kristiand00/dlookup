@@ -58,6 +58,9 @@ func (m mainModel) defaultLookupType() string {
 	if m.lastLookupType != "" {
 		return m.lastLookupType
 	}
+	if _, ok := lookup.GetProvider(lookup.DefaultLookupName); ok {
+		return lookup.DefaultLookupName
+	}
 	if _, ok := lookup.GetProvider("DIG (A)"); ok {
 		return "DIG (A)"
 	}
@@ -114,9 +117,73 @@ func (m *mainModel) closeDialog() {
 	m.dialog = ui.Dialog{}
 }
 
-// openLookupDialog opens the New/Change lookup dialog. tabID -1 runs the lookup
-// in a new tab (or reuses an empty one).
-func (m *mainModel) openLookupDialog(tabID int, domain, lookupType, server string) tea.Cmd {
+// sdigQTypes are the query types offered for the SDIG lookup.
+var sdigQTypes = []string{"A", "AAAA", "MX", "NS", "TXT", "SOA", "CNAME", "CAA", "PTR", "SRV", "DS", "DNSKEY", "HTTPS", "SVCB", "TLSA", "SSHFP", "NAPTR", "ANY"}
+
+// sdigQTypeOptions returns the Query type dropdown options; cur is added if
+// it is not one of them (e.g. set with --qtype).
+func sdigQTypeOptions(cur string) []ui.Option {
+	opts := []ui.Option{{Label: "Auto (A; PTR for IPs)", Value: ""}}
+	found := cur == ""
+	for _, t := range sdigQTypes {
+		opts = append(opts, ui.Option{Label: t, Value: t})
+		found = found || t == cur
+	}
+	if !found {
+		opts = append(opts, ui.Option{Label: cur, Value: cur})
+	}
+	return opts
+}
+
+// lookupDialogFields are the lookup dialog's fields. The SDIG options are
+// only shown when lookupType is SDIG (the dialog is rebuilt when it changes).
+func lookupDialogFields(domain, lookupType, server string, opts lookup.Options) []ui.Field {
+	fields := []ui.Field{
+		{Key: "domain", Label: "Domain/IP", Kind: ui.FieldText, Value: domain, Placeholder: "example.com or 1.1.1.1", Validate: validateTargetField, CharLimit: lookup.MaxTargetLength},
+		{Key: "type", Label: "Lookup", Kind: ui.FieldSelect, Value: lookupType, Options: lookupTypeOptions()},
+		{Key: "server", Label: "DNS server", Kind: ui.FieldText, Value: server, Placeholder: "system default", Validate: validateOptionalServer, CharLimit: 128},
+	}
+	if lookupType == lookup.SDIGName {
+		qt := strings.ToUpper(strings.TrimSpace(opts.QType))
+		fields = append(fields,
+			ui.Field{Key: "qtype", Label: "Query type", Kind: ui.FieldSelect, Value: qt, Options: sdigQTypeOptions(qt)},
+			ui.Field{Key: "recurse", Label: "Recurse (RD)", Kind: ui.FieldCheckbox, Checked: !opts.NoRecurse},
+			ui.Field{Key: "dnssec", Label: "DNSSEC (DO)", Kind: ui.FieldCheckbox, Checked: opts.DNSSEC},
+			ui.Field{Key: "tcp", Label: "TCP", Kind: ui.FieldCheckbox, Checked: opts.TCP},
+			ui.Field{Key: "hidettl", Label: "Hide TTL", Kind: ui.FieldCheckbox, Checked: opts.HideTTL},
+		)
+	}
+	return fields
+}
+
+// applySDIGFields copies the SDIG dialog fields from v into opts (if present).
+func applySDIGFields(opts lookup.Options, v map[string]string) lookup.Options {
+	if _, ok := v["qtype"]; !ok {
+		return opts
+	}
+	opts.QType = v["qtype"]
+	opts.NoRecurse = !fieldTrue(v["recurse"])
+	opts.DNSSEC = fieldTrue(v["dnssec"])
+	opts.TCP = fieldTrue(v["tcp"])
+	opts.HideTTL = fieldTrue(v["hidettl"])
+	return opts
+}
+
+// newLookupDialog builds the New/Change lookup dialog.
+func (m *mainModel) newLookupDialog(title, domain, lookupType, server string, opts lookup.Options) ui.Dialog {
+	d := ui.NewDialog("dl-dlg-lookup", title, lookupDialogFields(domain, lookupType, server, opts), []ui.Button{
+		{Label: "Run", Action: btnRun, Default: true},
+		{Label: "Cancel", Action: btnCancel},
+	}, ui.ActiveTheme())
+	d.Width = m.dialogWidth(64)
+	d.Help = "Tab: next · Space: open list · Enter: run · Esc: cancel"
+	return d
+}
+
+// openLookupDialog opens the New/Change lookup dialog prefilled from opts
+// (server and SDIG options). tabID -1 runs the lookup in a new tab (or reuses
+// an empty one).
+func (m *mainModel) openLookupDialog(tabID int, domain, lookupType string, opts lookup.Options) tea.Cmd {
 	title := "New lookup"
 	if tabID >= 0 {
 		title = "Change lookup"
@@ -124,17 +191,25 @@ func (m *mainModel) openLookupDialog(tabID int, domain, lookupType, server strin
 	if lookupType == "" {
 		lookupType = m.defaultLookupType()
 	}
-	d := ui.NewDialog("dl-dlg-lookup", title, []ui.Field{
-		{Key: "domain", Label: "Domain/IP", Kind: ui.FieldText, Value: domain, Placeholder: "example.com or 1.1.1.1", Validate: validateTargetField, CharLimit: lookup.MaxTargetLength},
-		{Key: "type", Label: "Lookup", Kind: ui.FieldSelect, Value: lookupType, Options: lookupTypeOptions()},
-		{Key: "server", Label: "DNS server", Kind: ui.FieldText, Value: server, Placeholder: "system default", Validate: validateOptionalServer, CharLimit: 128},
-	}, []ui.Button{
-		{Label: "Run", Action: btnRun, Default: true},
-		{Label: "Cancel", Action: btnCancel},
-	}, ui.DefaultTheme())
-	d.Width = m.dialogWidth(64)
-	d.Help = "Tab: next · Space: open list · Enter: run · Esc: cancel"
-	return m.openDialog(dlgLookup, tabID, d)
+	m.dlgOpts = opts
+	return m.openDialog(dlgLookup, tabID, m.newLookupDialog(title, domain, lookupType, opts.Server, opts))
+}
+
+// syncLookupDialog rebuilds the lookup dialog when the chosen lookup type
+// gains or loses the SDIG option fields, keeping the entered values.
+func (m *mainModel) syncLookupDialog() tea.Cmd {
+	typ := m.dialog.Value("type")
+	v := m.dialog.Values()
+	_, hasSDIG := v["qtype"]
+	if hasSDIG == (typ == lookup.SDIGName) {
+		return nil
+	}
+	m.dlgOpts = applySDIGFields(m.dlgOpts, v)
+	d := m.newLookupDialog(m.dialog.Title, v["domain"], typ, v["server"], m.dlgOpts)
+	d.Width = m.dialog.Width
+	d.FocusField("type")
+	m.dialog = d
+	return d.Init()
 }
 
 // openZoneDiffDialog opens the zone diff dialog prefilled with domain and form.
@@ -149,7 +224,7 @@ func (m *mainModel) openZoneDiffDialog(tabID int, domain string, f zoneDiffForm)
 	}, []ui.Button{
 		{Label: "Run", Action: btnRun, Default: true},
 		{Label: "Cancel", Action: btnCancel},
-	}, ui.DefaultTheme())
+	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(66)
 	d.Help = "Compares the domain's records on its nameservers (or Old server) with New server."
 	cmd := m.openDialog(dlgZoneDiff, tabID, d)
@@ -183,7 +258,7 @@ func (m *mainModel) openWatchDialog(t *tabModel) tea.Cmd {
 	}, []ui.Button{
 		{Label: "Watch", Action: btnRun, Default: true},
 		{Label: "Cancel", Action: btnCancel},
-	}, ui.DefaultTheme())
+	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(50)
 	d.Help = "Re-runs the lookup and highlights changes."
 	return m.openDialog(dlgWatch, t.id, d)
@@ -196,7 +271,7 @@ func (m *mainModel) openExportDialog(t *tabModel) tea.Cmd {
 	}, []ui.Button{
 		{Label: "Save", Action: btnRun, Default: true},
 		{Label: "Cancel", Action: btnCancel},
-	}, ui.DefaultTheme())
+	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(70)
 	d.Help = "Relative paths are saved in the current directory; ~/ is expanded."
 	return m.openDialog(dlgExport, t.id, d)
@@ -209,7 +284,7 @@ func (m *mainModel) openServerDialog(t *tabModel) tea.Cmd {
 	}, []ui.Button{
 		{Label: "Set", Action: btnRun, Default: true},
 		{Label: "Cancel", Action: btnCancel},
-	}, ui.DefaultTheme())
+	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(56)
 	d.Help = "Applies to this tab; the lookup re-runs when it changes."
 	return m.openDialog(dlgServer, t.id, d)
@@ -220,7 +295,7 @@ func (m *mainModel) openConfirm(kind dialogKind, tabID int, title, text string) 
 	d := ui.NewDialog("dl-dlg-confirm", title, infoFields(text), []ui.Button{
 		{Label: "Yes", Action: btnYes, Default: true},
 		{Label: "No", Action: btnCancel},
-	}, ui.DefaultTheme())
+	}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(50)
 	return m.openDialog(kind, tabID, d)
 }
@@ -237,7 +312,7 @@ func infoFields(text string) []ui.Field {
 
 // openInfo opens a message dialog with an OK button.
 func (m *mainModel) openInfo(title, text string) tea.Cmd {
-	d := ui.NewDialog("dl-dlg-info", title, infoFields(text), []ui.Button{{Label: "OK", Action: btnOK, Default: true}}, ui.DefaultTheme())
+	d := ui.NewDialog("dl-dlg-info", title, infoFields(text), []ui.Button{{Label: "OK", Action: btnOK, Default: true}}, ui.ActiveTheme())
 	d.Width = m.dialogWidth(64)
 	return m.openDialog(dlgInfo, -1, d)
 }
@@ -259,6 +334,9 @@ func (m *mainModel) updateDialog(msg tea.Msg) tea.Cmd {
 		// Choosing Zone diff in the lookup dialog swaps to the zone diff dialog.
 		if m.dlg == dlgLookup && m.dialog.Value("type") == zoneDiffName {
 			return tea.Batch(cmd, m.switchToZoneDiff(m.dialog.Value("domain")))
+		}
+		if m.dlg == dlgLookup {
+			return tea.Batch(cmd, m.syncLookupDialog())
 		}
 		return cmd
 	}
@@ -351,6 +429,9 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 			opts = m.tabs[i].lookupOpts
 		}
 		opts.Server = server
+		if typ == lookup.SDIGName {
+			opts = applySDIGFields(opts, v)
+		}
 		m.closeDialog()
 		m.lastLookupType = typ
 		cmd := m.tabs[i].run(domain, typ, opts)
@@ -431,6 +512,9 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 			cmds = append(cmds, t.rerun())
 		}
 		return tea.Batch(cmds...)
+
+	case dlgTheme:
+		return m.submitThemeDialog(res)
 
 	case dlgConfirmQuit:
 		m.closeDialog()

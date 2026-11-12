@@ -159,7 +159,7 @@ func newTabModel(width, height int, initialDomain, initialLookupType string, opt
 		if _, exists := lookup.GetProvider(initialLookupType); exists {
 			m.lookupType = initialLookupType
 			m.state = stateLoading
-			m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupType, m.domain)
+			m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupLabel(), m.domain)
 			m.initCmd = m.startLookup()
 		} else {
 			log.Printf("Warning: Invalid initial lookup type provided: %s", initialLookupType)
@@ -312,7 +312,7 @@ func (m *tabModel) rerun() tea.Cmd {
 		return m.runZoneDiff(m.zd.opts)
 	}
 	m.state = stateLoading
-	m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupType, m.domain)
+	m.loadingMsg = fmt.Sprintf("Running %s on %s...", m.lookupLabel(), m.domain)
 	m.err = nil
 	m.viewport.GotoTop()
 	return m.startLookup()
@@ -470,7 +470,7 @@ func (m *tabModel) renderContent() {
 			m.viewport.SetContent(m.renderZoneDiff())
 			return
 		}
-		b.WriteString(resultHeaderStyle.Render(fmt.Sprintf("%s Results for %s%s", m.lookupType, m.domain, m.watchLabel())))
+		b.WriteString(resultHeaderStyle.Render(fmt.Sprintf("%s Results for %s%s", m.lookupLabel(), m.domain, m.watchLabel())))
 		b.WriteString("\n")
 		if m.isWatching && !m.lastUpdated.IsZero() {
 			b.WriteString(watchInfoStyle.Render("Last updated " + m.lastUpdated.Format("15:04:05")))
@@ -499,7 +499,7 @@ func (m *tabModel) renderContent() {
 			}
 		}
 	case stateError:
-		header := fmt.Sprintf("Error running %s for %s%s", m.lookupType, m.domain, m.watchLabel())
+		header := fmt.Sprintf("Error running %s for %s%s", m.lookupLabel(), m.domain, m.watchLabel())
 		if m.isWatching && !m.lastUpdated.IsZero() {
 			header += "\nLast updated " + m.lastUpdated.Format("15:04:05")
 		}
@@ -520,11 +520,25 @@ func (m tabModel) plainContent() string {
 		}
 		return m.result
 	case stateError:
-		return fmt.Sprintf("Error running %s for %s%s\nError:\n%v", m.lookupType, m.domain, m.watchLabel(), m.err)
+		return fmt.Sprintf("Error running %s for %s%s\nError:\n%v", m.lookupLabel(), m.domain, m.watchLabel(), m.err)
 	case stateLoading:
 		return "(lookup in progress)"
 	}
 	return "(no results)"
+}
+
+// lookupLabel is the display name of the tab's lookup, e.g. "SDIG MX".
+func (m tabModel) lookupLabel() string {
+	return lookupLabel(m.lookupType, m.domain, m.lookupOpts)
+}
+
+// lookupLabel is the display name of lookupType on target: the SDIG lookup
+// includes its query type ("SDIG A"), other lookups are shown by name.
+func lookupLabel(lookupType, target string, opts lookup.Options) string {
+	if lookupType == lookup.SDIGName {
+		return lookup.SDIGLabel(target, opts)
+	}
+	return lookupType
 }
 
 // panelTitle is the title shown in the panel's top border:
@@ -538,7 +552,7 @@ func (m tabModel) panelTitle() string {
 	}
 	parts := []string{m.domain}
 	if m.lookupType != "" {
-		parts = append(parts, m.lookupType)
+		parts = append(parts, m.lookupLabel())
 	}
 	if m.isZoneDiff() {
 		if m.zd.opts.NewServer != "" {
@@ -622,6 +636,9 @@ func lookupCmd(ctx context.Context, id, seq int, domain, lookupType string, opts
 // countdowns between runs are not reported as changes.
 var ttlField = regexp.MustCompile(`^(\S+\s+)\d+(\s+(?:IN|CH|HS)\s)`)
 
+// sdigTTLField matches an SDIG record line "place<TAB>name<TAB>TTL<TAB>...".
+var sdigTTLField = regexp.MustCompile(`^([0-2]\t\S+\t)\d+(\t)`)
+
 // volatilePrefixes are output lines that change on every run (timings, ids).
 var volatilePrefixes = []string{";; Query time:", ";; WHEN:", ";; ->>HEADER<<-", ";; MSG SIZE"}
 
@@ -632,6 +649,9 @@ func diffKey(line string) string {
 		if strings.HasPrefix(t, p) {
 			return ""
 		}
+	}
+	if k := sdigTTLField.ReplaceAllString(t, "${1}_${2}"); k != t {
+		return k
 	}
 	return ttlField.ReplaceAllString(t, "${1}_${2}")
 }

@@ -189,13 +189,15 @@ func TestParseArgsInvalidTargetsSkipped(t *testing.T) {
 func TestParseArgsUsageErrors(t *testing.T) {
 	path := writeFile(t, "a.com\n")
 	cases := map[string][]string{
-		"headless without lookup":  {"-o", "json", "a.com"},
-		"headless without targets": {"-o", "json", "--lookup", fakeFlag},
-		"bad output":               {"-o", "xml", "--lookup", fakeFlag, "a.com"},
-		"unknown lookup":           {"--lookup", "nope", "a.com"},
-		"bad concurrency":          {"--concurrency", "0", "a.com"},
-		"unknown flag":             {"--bogus"},
-		"conflicting lookup":       {"--" + fakeFlag, path, "--lookup", "zz-other"},
+		"bad qtype":                 {"-t", "NOPE", "a.com"},
+		"sdig option, other lookup": {"--lookup", fakeFlag, "--dnssec", "a.com"},
+		"qtype, other lookup":       {"-t", "MX", "--" + fakeFlag, path},
+		"headless without targets":  {"-o", "json", "--lookup", fakeFlag},
+		"bad output":                {"-o", "xml", "--lookup", fakeFlag, "a.com"},
+		"unknown lookup":            {"--lookup", "nope", "a.com"},
+		"bad concurrency":           {"--concurrency", "0", "a.com"},
+		"unknown flag":              {"--bogus"},
+		"conflicting lookup":        {"--" + fakeFlag, path, "--lookup", "zz-other"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -251,7 +253,7 @@ func TestVersion(t *testing.T) {
 
 func TestRunUsageErrorExitCode(t *testing.T) {
 	var stderr bytes.Buffer
-	if code := run([]string{"-o", "json", "a.com"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
+	if code := run([]string{"-o", "json", "--norecurse"}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
 }

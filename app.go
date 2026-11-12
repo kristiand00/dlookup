@@ -31,17 +31,18 @@ type mainModel struct {
 	// Modal dialog (dlg == dlgNone when closed).
 	dialog         ui.Dialog
 	dlg            dialogKind
-	dlgTab         int // id of the tab the dialog acts on; -1 = none/new tab
+	dlgTab         int            // id of the tab the dialog acts on; -1 = none/new tab
+	dlgOpts        lookup.Options // options the lookup dialog was opened with
 	lastLookupType string
 	initCmd        tea.Cmd
 }
 
 // newMainModel builds the main model. With no initial targets it starts on the
 // Home (help) tab; otherwise there is one tab per target, all started by Init.
-// When targets are given without a lookup type, the lookup dialog opens for the
-// first one. Every tab, including ones opened later, starts with opts.
+// Targets given without a lookup type run the default SDIG lookup (opts.QType,
+// default A). Every tab, including ones opened later, starts with opts.
 func newMainModel(initialDomains []string, initialLookupType string, cfg AppConfig, opts lookup.Options) mainModel {
-	th := ui.DefaultTheme()
+	th := ui.ActiveTheme()
 	m := mainModel{
 		width:       80,
 		height:      24,
@@ -52,6 +53,11 @@ func newMainModel(initialDomains []string, initialLookupType string, cfg AppConf
 		tabBar:      ui.TabBar{ID: "dl-tabs", Theme: th},
 		fkeyBar:     ui.FKeyBar{ID: "dl-fkeys", Theme: th},
 		dlgTab:      -1,
+	}
+	if initialLookupType == "" && len(initialDomains) > 0 {
+		if _, ok := lookup.GetProvider(lookup.DefaultLookupName); ok {
+			initialLookupType = lookup.DefaultLookupName
+		}
 	}
 	if _, ok := lookup.GetProvider(initialLookupType); ok {
 		m.lastLookupType = initialLookupType
@@ -65,7 +71,7 @@ func newMainModel(initialDomains []string, initialLookupType string, cfg AppConf
 	}
 	m.refreshHome()
 	if t := m.tabs[0]; t.state == stateIdle && t.domain != "" {
-		m.initCmd = m.openLookupDialog(t.id, t.domain, "", t.lookupOpts.Server)
+		m.initCmd = m.openLookupDialog(t.id, t.domain, "", t.lookupOpts)
 	}
 	m.syncMenu()
 	return m
@@ -359,10 +365,12 @@ func (m *mainModel) do(action string) tea.Cmd {
 	}
 
 	switch action {
+	case actTheme:
+		return m.openThemeDialog()
 	case actHelp:
 		m.showHome()
 	case actNew, actNewTab:
-		return m.openLookupDialog(-1, "", "", m.defaultOpts.Server)
+		return m.openLookupDialog(-1, "", "", m.defaultOpts)
 	case actChange:
 		if !lookupTab {
 			return m.do(actNew)
@@ -370,7 +378,7 @@ func (m *mainModel) do(action string) tea.Cmd {
 		if t.isZoneDiff() {
 			return m.openZoneDiffDialog(t.id, t.domain, t.zd.form)
 		}
-		return m.openLookupDialog(t.id, t.domain, t.lookupType, t.lookupOpts.Server)
+		return m.openLookupDialog(t.id, t.domain, t.lookupType, t.lookupOpts)
 	case actZoneDiff:
 		if lookupTab {
 			domain := t.domain
@@ -389,7 +397,7 @@ func (m *mainModel) do(action string) tea.Cmd {
 			m.lastLookupType = lookup.ComprehensiveReportName
 			return t.run(t.domain, lookup.ComprehensiveReportName, t.lookupOpts)
 		}
-		return m.openLookupDialog(-1, "", lookup.ComprehensiveReportName, m.defaultOpts.Server)
+		return m.openLookupDialog(-1, "", lookup.ComprehensiveReportName, m.defaultOpts)
 	case actWatch:
 		if !lookupTab {
 			return nil
@@ -492,7 +500,7 @@ func (m mainModel) exportAllContent() string {
 			title = fmt.Sprintf("Tab %d", i+1)
 		}
 		if t.lookupType != "" {
-			title += " — " + t.lookupType
+			title += " — " + t.lookupLabel()
 		}
 		if t.isZoneDiff() {
 			if t.zd.opts.NewServer != "" {
@@ -560,7 +568,7 @@ func (m mainModel) tabInfos() []ui.Tab {
 	return out
 }
 
-func (m mainModel) View() string { return ui.Scan(m.render()) }
+func (m mainModel) View() string { return paintScreen(ui.Scan(m.render()), m.width) }
 
 // render composes the screen with zone markers still in place (View scans them).
 func (m mainModel) render() string {

@@ -14,9 +14,25 @@ import (
 const DefaultTimeout = 15 * time.Second
 
 // Options configures a single lookup execution.
+//
+// The zero value gives sensible defaults. The fields after Timeout are used
+// only by the SDIG lookup; other lookups ignore them.
 type Options struct {
 	Server  string        // optional DNS server, e.g. "1.1.1.1" or "1.1.1.1:53"; "" = system default
 	Timeout time.Duration // 0 = DefaultTimeout
+
+	// SDIG query options (see provider_sdig.go).
+	QType          string // query type, e.g. "MX"; "" = A (PTR on the reverse name for IP targets)
+	Class          uint16 // query class; 0 = IN
+	NoRecurse      bool   // clear the RD bit (real sdig's default); zero value = RD set
+	DNSSEC         bool   // set the DO bit (adds EDNS)
+	TCP            bool   // query over TCP
+	DoT            bool   // DNS over TLS (port 853 unless Server has a port)
+	Insecure       bool   // DoT: do not validate the server certificate
+	HideTTL        bool   // print "[ttl]" instead of TTLs
+	HideSOADetails bool   // print "[serial]" instead of the SOA serial
+	ShowFlags      bool   // show NSEC3 flags
+	EDNSSubnet     string // EDNS Client Subnet to send, e.g. "192.0.2.0/24"
 }
 
 // timeout returns the effective timeout for these options.
