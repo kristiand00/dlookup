@@ -1,17 +1,20 @@
 package lookup_test
 
 import (
+	"context"
 	"dlookup/lookup"
 	"fmt"
 	"reflect" // For DeepEqual
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetComprehensiveReportOrder(t *testing.T) {
 	expectedOrder := []string{
-		"NSLOOKUP", "DIG (A)", "DIG (AAAA)", "DIG (MX)", "DIG (CNAME)",
-		"DIG (TXT)", "DIG (SOA)", "DIG (ANY)", "WHOIS",
+		"NSLOOKUP", "DIG (A)", "DIG (AAAA)", "DIG (CNAME)", "DIG (MX)",
+		"DIG (NS)", "DIG (SOA)", "DIG (TXT)", "DIG (SPF)", "DIG (DMARC)",
+		"DIG (CAA)", "DIG (PTR)", "Delegation", "DNSSEC", "Email", "RDAP", "WHOIS",
 	}
 	actualOrder := lookup.GetComprehensiveReportOrder()
 	if !reflect.DeepEqual(actualOrder, expectedOrder) {
@@ -92,7 +95,7 @@ func TestFormatComprehensiveReport(t *testing.T) {
 		if indexC == -1 || indexA == -1 || indexB == -1 {
 			t.Fatalf("Not all provider headers found in output. Got:\n%s", output)
 		}
-		if !(indexC < indexA && indexA < indexB) {
+		if indexC >= indexA || indexA >= indexB {
 			t.Errorf("Output not in specified order. C at %d, A at %d, B at %d. Got:\n%s", indexC, indexA, indexB, output)
 		}
 	})
@@ -121,7 +124,6 @@ func TestFormatComprehensiveReport(t *testing.T) {
 		if strings.Contains(output, "--- InOrderOnly ---") {
 			t.Errorf("'InOrderOnly' (in order, not results) should not be present based on current FormatComprehensiveReport behavior. Got:\n%s", output)
 		}
-
 
 		// Provider in results, not in order (should be appended, sorted alphabetically)
 		if !strings.Contains(output, "--- InResultsOnly ---") || !strings.Contains(output, "Data 2") {
@@ -155,7 +157,7 @@ type simpleMockProvider struct {
 }
 
 func (m *simpleMockProvider) Name() string { return m.name }
-func (m *simpleMockProvider) Execute(domain string) (string, error) {
+func (m *simpleMockProvider) Execute(_ context.Context, domain string, _ lookup.Options) (string, error) {
 	if m.executeFunc != nil {
 		return m.executeFunc(domain)
 	}
@@ -164,7 +166,8 @@ func (m *simpleMockProvider) Execute(domain string) (string, error) {
 }
 func (m *simpleMockProvider) CheckAvailability() bool { return m.checkAvailability }
 func (m *simpleMockProvider) FlagName() string        { return m.flagName } // Not strictly needed by ComprehensiveReportProvider
-func (m *simpleMockProvider) Usage() string           { return m.usage }    // Not strictly needed
+func (m *simpleMockProvider) Command() string         { return "" }
+func (m *simpleMockProvider) Usage() string           { return m.usage } // Not strictly needed
 
 // TestComprehensiveReportProvider_Execute tests the orchestration logic of ComprehensiveReportProvider.
 func TestComprehensiveReportProvider_Execute(t *testing.T) {
@@ -221,12 +224,23 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 
 	domainToTest := "example.com"
 
+	// Real providers (dig, whois, ...) also run as part of the report; stub out the
+	// command runner so the test doesn't depend on installed binaries or the network.
+	origRunCommand := lookup.OsRunCommand
+	defer func() { lookup.OsRunCommand = origRunCommand }()
+	lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
+		return "stubbed " + cmdName, nil
+	}
+	// Native DNS and RDAP providers run too: point them at local test servers.
+	opts := lookup.Options{Server: startDNSServer(t), Timeout: 5 * time.Second}
+	startRDAPServer(t, map[string]string{"domain/example.com": `{"objectClassName":"domain","ldhName":"EXAMPLE.COM"}`})
+
 	// The comprehensiveProvider.Execute() will use the GetComprehensiveReportOrder()
 	// and then append any other available providers not in that order.
 	// Our mock providers will fall into the "appended" category.
 
 	t.Run("SuccessfulAndPartialFailureAggregation", func(t *testing.T) {
-		output, err := comprehensiveProvider.Execute(domainToTest)
+		output, err := comprehensiveProvider.Execute(context.Background(), domainToTest, opts)
 		if err != nil {
 			t.Fatalf("ComprehensiveProvider.Execute() returned an unexpected error: %v", err)
 		}
@@ -234,6 +248,16 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 		// Check for domain header
 		if !strings.Contains(output, fmt.Sprintf("Comprehensive Report for: %s", domainToTest)) {
 			t.Errorf("Output missing main domain header. Got:\n%s", output)
+		}
+
+		// Real native providers ran against the local servers; ANY is excluded.
+		for _, want := range []string{"--- DIG (A) ---\nexample.com. 300 IN A 192.0.2.1", "--- DIG (SPF) ---", "--- RDAP ---\nDomain:", "--- WHOIS ---"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("Output missing %q. Got:\n%s", want, output)
+			}
+		}
+		if strings.Contains(output, "DIG (ANY)") {
+			t.Errorf("DIG (ANY) should be excluded from the report. Got:\n%s", output)
 		}
 
 		// Check for CompTestMock-Success output
@@ -245,8 +269,7 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 		}
 
 		// Check for CompTestMock-Failure output (error case)
-		// The refactored Execute stores: fmt.Sprintf("Error: %v\nOutput:\n%s", err, output)
-		expectedFailureString := "Error: CompTestMock-Failure error\nOutput:\nFailure output from CompTestMock-Failure"
+		expectedFailureString := "Error executing CompTestMock-Failure: CompTestMock-Failure error\n--- Raw Output (if any) ---\nFailure output from CompTestMock-Failure"
 		if !strings.Contains(output, "--- CompTestMock-Failure ---") {
 			t.Errorf("Output missing header for CompTestMock-Failure. Got:\n%s", output)
 		}
@@ -261,22 +284,22 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 		if !strings.Contains(output, "Another success output from CompTestMock-AnotherSuccess") {
 			t.Errorf("Output missing data for CompTestMock-AnotherSuccess. Got:\n%s", output)
 		}
-		
-		// Check that CompTestMock-Unavailable is NOT present
-		if strings.Contains(output, "--- CompTestMock-Unavailable ---") {
-			t.Errorf("Output unexpectedly contains header for unavailable provider CompTestMock-Unavailable. Got:\n%s", output)
+
+		// Unavailable providers are listed with a note, but never executed
+		if !strings.Contains(output, "--- CompTestMock-Unavailable ---\n(Command for CompTestMock-Unavailable not available)") {
+			t.Errorf("Output missing unavailable note for CompTestMock-Unavailable. Got:\n%s", output)
 		}
 		if strings.Contains(output, "Output from CompTestMock-Unavailable") {
 			t.Errorf("Output unexpectedly contains data from unavailable provider CompTestMock-Unavailable. Got:\n%s", output)
 		}
-		
+
 		// Check alphabetical ordering of these ad-hoc providers
 		// "CompTestMock-AnotherSuccess", "CompTestMock-Failure", "CompTestMock-Success"
 		idxAnotherSuccess := strings.Index(output, "--- CompTestMock-AnotherSuccess ---")
 		idxFailure := strings.Index(output, "--- CompTestMock-Failure ---")
 		idxSuccess := strings.Index(output, "--- CompTestMock-Success ---")
 
-		if !(idxAnotherSuccess < idxFailure && idxFailure < idxSuccess) {
+		if idxAnotherSuccess >= idxFailure || idxFailure >= idxSuccess {
 			t.Errorf("Ad-hoc providers not in expected alphabetical order. AnotherSuccess: %d, Failure: %d, Success: %d. Output:\n%s", idxAnotherSuccess, idxFailure, idxSuccess, output)
 		}
 	})
@@ -309,17 +332,17 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 		lookup.RegisterProvider(failingMock1)
 		lookup.RegisterProvider(failingMock2)
 
-		output, err := comprehensiveProvider.Execute(domainToTest)
+		output, err := comprehensiveProvider.Execute(context.Background(), domainToTest, opts)
 		if err != nil {
 			t.Fatalf("ComprehensiveProvider.Execute() returned an unexpected error: %v", err)
 		}
 
-		expectedError1Str := "Error: FailingMock1 error\nOutput:\nOutput from FailingMock1"
+		expectedError1Str := "Error executing CompTestFailingMock1: FailingMock1 error\n--- Raw Output (if any) ---\nOutput from FailingMock1"
 		if !strings.Contains(output, "--- CompTestFailingMock1 ---") || !strings.Contains(output, expectedError1Str) {
 			t.Errorf("Output missing or incorrect error data for CompTestFailingMock1. Expected '%s'. Got:\n%s", expectedError1Str, output)
 		}
 
-		expectedError2Str := "Error: FailingMock2 error\nOutput:\nOutput from FailingMock2"
+		expectedError2Str := "Error executing CompTestFailingMock2: FailingMock2 error\n--- Raw Output (if any) ---\nOutput from FailingMock2"
 		if !strings.Contains(output, "--- CompTestFailingMock2 ---") || !strings.Contains(output, expectedError2Str) {
 			t.Errorf("Output missing or incorrect error data for CompTestFailingMock2. Expected '%s'. Got:\n%s", expectedError2Str, output)
 		}

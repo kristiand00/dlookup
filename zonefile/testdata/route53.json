@@ -1,0 +1,14 @@
+{
+    "ResourceRecordSets": [
+        {"Name": "example.com.", "Type": "A", "AliasTarget": {"HostedZoneId": "Z2FDTNDATAQYW2", "DNSName": "d111111abcdef8.cloudfront.net.", "EvaluateTargetHealth": false}},
+        {"Name": "example.com.", "Type": "MX", "TTL": 300, "ResourceRecords": [{"Value": "10 mail.example.com."}, {"Value": "20 mail2.example.com."}]},
+        {"Name": "example.com.", "Type": "NS", "TTL": 172800, "ResourceRecords": [{"Value": "ns-1.awsdns-01.org."}, {"Value": "ns-2.awsdns-02.co.uk."}]},
+        {"Name": "example.com.", "Type": "SOA", "TTL": 900, "ResourceRecords": [{"Value": "ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"}]},
+        {"Name": "example.com.", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=spf1 include:amazonses.com -all\""}, {"Value": "\"google-site-verification=abc123\""}]},
+        {"Name": "\\052.example.com.", "Type": "A", "TTL": 60, "ResourceRecords": [{"Value": "192.0.2.50"}]},
+        {"Name": "api.example.com.", "Type": "A", "SetIdentifier": "eu", "Weight": 70, "TTL": 60, "ResourceRecords": [{"Value": "192.0.2.60"}]},
+        {"Name": "api.example.com.", "Type": "A", "SetIdentifier": "us", "Weight": 30, "TTL": 60, "ResourceRecords": [{"Value": "192.0.2.61"}]},
+        {"Name": "google._domainkey.example.com.", "Type": "TXT", "TTL": 300, "ResourceRecords": [{"Value": "\"v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq\" \"1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1Exq1ExIDAQAB\""}]},
+        {"Name": "www.example.com.", "Type": "CNAME", "TTL": 300, "ResourceRecords": [{"Value": "example.com"}]}
+    ]
+}

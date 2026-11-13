@@ -1,6 +1,7 @@
 package lookup_test
 
 import (
+	"context"
 	"dlookup/lookup"
 	"fmt"
 	"strings"
@@ -73,13 +74,13 @@ func TestWhoisProvider_Execute(t *testing.T) {
 	// Test Case 1: Successful execution
 	t.Run("Success", func(t *testing.T) {
 		expectedOutput := "Mocked whois output for " + domainToTest
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return expectedOutput, nil
 		}
 
-		output, err := provider.Execute(domainToTest)
+		output, err := provider.Execute(context.Background(), domainToTest, lookup.Options{})
 		if err != nil {
 			t.Errorf("Execute() error = %v, want nil", err)
 		}
@@ -98,13 +99,13 @@ func TestWhoisProvider_Execute(t *testing.T) {
 	// Test Case 2: Command execution failure
 	t.Run("CommandFailure", func(t *testing.T) {
 		mockError := fmt.Errorf("mocked whois error")
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return "error whois output", mockError
 		}
 
-		output, err := provider.Execute(domainToTest)
+		output, err := provider.Execute(context.Background(), domainToTest, lookup.Options{})
 		if err == nil {
 			t.Fatalf("Execute() error = nil, want non-nil")
 		}
@@ -126,13 +127,13 @@ func TestWhoisProvider_Execute(t *testing.T) {
 	t.Run("NoOutput", func(t *testing.T) {
 		// RunCommand should convert empty raw output to "(No results found)"
 		expectedOutput := "(No results found)"
-		lookup.OsRunCommand = func(cmdName string, args ...string) (string, error) {
+		lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
 			capturedCmdName = cmdName
 			capturedArgs = args
 			return "", nil // Mock OsRunCommand returns empty string and nil error
 		}
 
-		output, err := provider.Execute("nodata.example.com")
+		output, err := provider.Execute(context.Background(), "nodata.example.com", lookup.Options{})
 		if err != nil {
 			t.Errorf("Execute() error = %v, want nil", err)
 		}
@@ -140,4 +141,44 @@ func TestWhoisProvider_Execute(t *testing.T) {
 			t.Errorf("Execute() output = %q, want %q", output, expectedOutput)
 		}
 	})
+}
+
+// TestExternalProviders_RejectInjection ensures option-like or malformed
+// targets never reach external commands.
+func TestExternalProviders_RejectInjection(t *testing.T) {
+	origRunCommand := lookup.OsRunCommand
+	defer func() { lookup.OsRunCommand = origRunCommand }()
+	origCheck := lookup.LookupCheckCommandFunc
+	defer func() { lookup.LookupCheckCommandFunc = origCheck }()
+	lookup.LookupCheckCommandFunc = func(string) bool { return true }
+
+	var called []string
+	lookup.OsRunCommand = func(_ context.Context, cmdName string, args ...string) (string, error) {
+		called = append(called, cmdName+" "+strings.Join(args, " "))
+		return "ok", nil
+	}
+	for _, name := range []string{"WHOIS", "NSLOOKUP", lookup.ComprehensiveReportName} {
+		p, _ := lookup.GetProvider(name)
+		for _, bad := range []string{"-h", "+norec", "a b", "x;y", ""} {
+			if _, err := p.Execute(context.Background(), bad, lookup.Options{}); err == nil {
+				t.Errorf("%s.Execute(%q): expected error", name, bad)
+			}
+		}
+	}
+	p, _ := lookup.GetProvider("NSLOOKUP")
+	if _, err := p.Execute(context.Background(), "example.com", lookup.Options{Server: "-debug"}); err == nil {
+		t.Error("NSLOOKUP with option-like server: expected error")
+	}
+	if len(called) != 0 {
+		t.Errorf("external commands were run: %v", called)
+	}
+
+	// IDN targets are passed to external tools in punycode.
+	w, _ := lookup.GetProvider("WHOIS")
+	if _, err := w.Execute(context.Background(), "Bücher.example", lookup.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(called) != 1 || called[0] != "whois xn--bcher-kva.example" {
+		t.Errorf("called = %v", called)
+	}
 }

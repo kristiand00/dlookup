@@ -1,46 +1,38 @@
-name: Release Binaries
+name: Release
 
 on:
   push:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write # Required to create the GitHub release
+
 jobs:
   release:
-    name: Build and Release
+    name: GoReleaser
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Required to create a release
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # GoReleaser needs full history for the changelog
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24' # Specify your Go version
+          go-version-file: go.mod
 
-      - name: Build for Linux (amd64)
-        run: GOOS=linux GOARCH=amd64 go build -o dlookup-linux-amd64 .
-      - name: Build for Linux (arm64)
-        run: GOOS=linux GOARCH=arm64 go build -o dlookup-linux-arm64 .
-      - name: Build for macOS (amd64)
-        run: GOOS=darwin GOARCH=amd64 go build -o dlookup-macos-amd64 .
-      - name: Build for macOS (arm64)
-        run: GOOS=darwin GOARCH=arm64 go build -o dlookup-macos-arm64 .
-      - name: Build for Windows (amd64)
-        run: GOOS=windows GOARCH=amd64 go build -o dlookup-windows-amd64.exe .
-      - name: Build for Windows (arm64)
-        run: GOOS=windows GOARCH=arm64 go build -o dlookup-windows-arm64.exe .
+      - name: Run tests
+        run: go test -race ./...
 
-      - name: Create Release and Upload Binaries
-        uses: softprops/action-gh-release@v2
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          files: |
-            dlookup-linux-amd64
-            dlookup-linux-arm64
-            dlookup-macos-amd64
-            dlookup-macos-arm64
-            dlookup-windows-amd64.exe
-            dlookup-windows-arm64.exe
-          fail_on_unmatched_files: true
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uncomment once the Homebrew tap is configured (see .goreleaser.yaml):
+          # HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

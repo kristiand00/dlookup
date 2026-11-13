@@ -1,9 +1,13 @@
 package lookup_test
 
 import (
+	"context"
 	"dlookup/lookup" // Assuming dlookup is the module name
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // mockProvider is a simple implementation of lookup.LookupProvider for testing.
@@ -14,11 +18,14 @@ type mockProvider struct {
 	available bool
 }
 
-func (m *mockProvider) Name() string                                  { return m.name }
-func (m *mockProvider) Execute(domain string) (string, error)         { return fmt.Sprintf("executed %s for %s", m.name, domain), nil }
-func (m *mockProvider) CheckAvailability() bool                       { return m.available }
-func (m *mockProvider) FlagName() string                              { return m.flagName }
-func (m *mockProvider) Usage() string                                 { return m.usage }
+func (m *mockProvider) Name() string { return m.name }
+func (m *mockProvider) Execute(_ context.Context, domain string, _ lookup.Options) (string, error) {
+	return fmt.Sprintf("executed %s for %s", m.name, domain), nil
+}
+func (m *mockProvider) CheckAvailability() bool { return m.available }
+func (m *mockProvider) FlagName() string        { return m.flagName }
+func (m *mockProvider) Command() string         { return "" }
+func (m *mockProvider) Usage() string           { return m.usage }
 
 func assertPanics(t *testing.T, fn func(), expectedPanicValue interface{}) {
 	t.Helper()
@@ -159,4 +166,110 @@ func TestProviderAvailability(t *testing.T) {
 	// or reset the mockP.available field. Since unregistration is not an option, we'll just
 	// set it back to a known state if necessary, though for this test, it's the last action.
 	mockP.available = true // Reset for potential other tests if any depended on this exact provider instance
+}
+
+func TestValidateTarget(t *testing.T) {
+	valid := []string{
+		"example.com", "example.com.", "  example.com  ", "sub.domain.example.co.uk",
+		"localhost", "xn--bcher-kva.example", "bücher.example", "例え.jp", "_dmarc.example.com",
+		"a-b.example", "192.0.2.1", "2001:db8::1", "::1", "1.2.0.192.in-addr.arpa",
+		strings.Repeat("a", 63) + ".com",
+	}
+	for _, s := range valid {
+		if err := lookup.ValidateTarget(s); err != nil {
+			t.Errorf("ValidateTarget(%q) = %v, want nil", s, err)
+		}
+	}
+	invalid := []string{
+		"", "   ", "\t\n", "exa mple.com", "example.com\nfoo", "-x", "--help", "+short",
+		"-example.com", "example-.com", "exa..mple.com", ".", "example.com/path",
+		"exa$mple.com", "a;rm -rf", strings.Repeat("a", 64) + ".com",
+		strings.Repeat("abcdefghi.", 26) + "com", // 263 chars
+		"300.1.1.1", "1.2.3", "fe80::1%eth0", "example.com\x00",
+	}
+	for _, s := range invalid {
+		if err := lookup.ValidateTarget(s); err == nil {
+			t.Errorf("ValidateTarget(%q) = nil, want error", s)
+		}
+	}
+}
+
+func TestNormalizeTarget(t *testing.T) {
+	cases := map[string]string{
+		"Example.COM.":   "example.com",
+		"bücher.example": "xn--bcher-kva.example",
+		" 192.0.2.1 ":    "192.0.2.1",
+	}
+	for in, want := range cases {
+		got, err := lookup.NormalizeTarget(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeTarget(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestValidateServer(t *testing.T) {
+	for _, s := range []string{"1.1.1.1", "1.1.1.1:53", "[::1]:5353", "2606:4700::1111", "dns.google", "dns.google:853"} {
+		if err := lookup.ValidateServer(s); err != nil {
+			t.Errorf("ValidateServer(%q) = %v", s, err)
+		}
+	}
+	for _, s := range []string{"", "-p", "1.1.1.1:0", "1.1.1.1:99999", "1.1.1.1:x", "a b"} {
+		if err := lookup.ValidateServer(s); err == nil {
+			t.Errorf("ValidateServer(%q) = nil, want error", s)
+		}
+	}
+}
+
+func TestProviderCommands(t *testing.T) {
+	want := map[string]string{
+		"DIG (A)":                      "",
+		"RDAP":                         "",
+		"NSLOOKUP":                     "nslookup",
+		"WHOIS":                        "whois",
+		lookup.ComprehensiveReportName: "",
+	}
+	for name, cmd := range want {
+		p, ok := lookup.GetProvider(name)
+		if !ok {
+			t.Fatalf("provider %q not found", name)
+		}
+		if got := p.Command(); got != cmd {
+			t.Errorf("%s.Command() = %q, want %q", name, got, cmd)
+		}
+	}
+}
+
+func TestRunCommand_AppliesTimeout(t *testing.T) {
+	origRunCommand := lookup.OsRunCommand
+	defer func() { lookup.OsRunCommand = origRunCommand }()
+
+	var deadline time.Time
+	lookup.OsRunCommand = func(ctx context.Context, cmdName string, args ...string) (string, error) {
+		deadline, _ = ctx.Deadline()
+		<-ctx.Done()
+		return "", errors.New("signal: killed")
+	}
+
+	start := time.Now()
+	_, err := lookup.RunCommand(context.Background(), lookup.Options{Timeout: 20 * time.Millisecond}, "sleep", "10")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunCommand error = %v, want wrapping context.DeadlineExceeded", err)
+	}
+	if deadline.IsZero() || deadline.Sub(start) > time.Second {
+		t.Errorf("expected a ~20ms deadline, got %v", deadline.Sub(start))
+	}
+
+	// Zero timeout falls back to DefaultTimeout.
+	lookup.OsRunCommand = func(ctx context.Context, cmdName string, args ...string) (string, error) {
+		deadline, _ = ctx.Deadline()
+		return "ok", nil
+	}
+	start = time.Now()
+	if _, err := lookup.RunCommand(context.Background(), lookup.Options{}, "true"); err != nil {
+		t.Fatalf("RunCommand error = %v", err)
+	}
+	if d := deadline.Sub(start); d < lookup.DefaultTimeout-time.Second || d > lookup.DefaultTimeout+time.Second {
+		t.Errorf("default deadline = %v, want ~%v", d, lookup.DefaultTimeout)
+	}
 }

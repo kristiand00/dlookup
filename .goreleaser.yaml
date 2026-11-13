@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: dlookup
+
+builds:
+  - id: dlookup
+    binary: dlookup
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: kristiand00
+    name: dlookup
+
+# Homebrew tap (optional). To enable:
+#   1. Create a public repo named `homebrew-tap` under kristiand00
+#      (github.com/kristiand00/homebrew-tap).
+#   2. Create a fine-grained PAT with "Contents: read & write" on that repo.
+#   3. Add it to this repo's secrets as HOMEBREW_TAP_GITHUB_TOKEN.
+#   4. Uncomment the block below and the HOMEBREW_TAP_GITHUB_TOKEN env line
+#      in .github/workflows/release.yml.
+#   Users can then: brew install kristiand00/tap/dlookup
+#   Note: newer GoReleaser (v2.10+) deprecates `brews` in favour of
+#   `homebrew_casks`; `brews` still works but prints a deprecation warning.
+#
+# brews:
+#   - name: dlookup
+#     repository:
+#       owner: kristiand00
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     directory: Formula
+#     homepage: https://github.com/kristiand00/dlookup
+#     description: Terminal UI for DNS, WHOIS and domain lookups
+#     license: MIT
+#     test: |
+#       assert_predicate bin/"dlookup", :exist?
