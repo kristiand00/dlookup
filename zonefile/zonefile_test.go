@@ -74,8 +74,6 @@ func dumpRecs(recs []Record) string {
 	return string(b)
 }
 
-func boolp(b bool) *bool { return &b }
-
 func TestParseBIND(t *testing.T) {
 	z := parseFile(t, "testdata/example.zone", BIND, "")
 	if z.Origin != "example.com." {

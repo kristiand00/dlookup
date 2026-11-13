@@ -248,8 +248,8 @@ func writeSection(b *strings.Builder, title string, ans overviewAnswer, qtype ui
 	if qtype == dns.TypeMX {
 		sort.SliceStable(lines, func(i, j int) bool {
 			var pi, pj int
-			fmt.Sscan(lines[i], &pi)
-			fmt.Sscan(lines[j], &pj)
+			_, _ = fmt.Sscan(lines[i], &pi) // MX value starts with its preference
+			_, _ = fmt.Sscan(lines[j], &pj)
 			return pi < pj
 		})
 	} else {

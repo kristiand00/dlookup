@@ -129,7 +129,7 @@ func writeBIND(w io.Writer, z *Zone, wr *writer) error {
 			if r.Comment != "" {
 				fmt.Fprintf(bw, " (%s)", r.Comment)
 			}
-			bw.WriteString("\n")
+			_, _ = bw.WriteString("\n")
 			continue
 		}
 		if _, ok := dns.StringToType[r.Type]; !ok && !strings.HasPrefix(r.Type, "TYPE") {
@@ -140,7 +140,7 @@ func writeBIND(w io.Writer, z *Zone, wr *writer) error {
 		if r.Name == prev {
 			owner = ""
 		} else if prev != "" {
-			bw.WriteString("\n")
+			_, _ = bw.WriteString("\n")
 		}
 		prev = r.Name
 		ttl := ""
@@ -166,7 +166,7 @@ func writeBIND(w io.Writer, z *Zone, wr *writer) error {
 		if len(comment) > 0 && r.Type != "SOA" {
 			line += " ; " + strings.Join(comment, " ")
 		}
-		bw.WriteString(strings.TrimRight(line, " ") + "\n")
+		_, _ = bw.WriteString(strings.TrimRight(line, " ") + "\n") // errors surface from Flush
 	}
 	return bw.Flush()
 }

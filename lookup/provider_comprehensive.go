@@ -95,7 +95,7 @@ func (p *ComprehensiveProvider) Execute(ctx context.Context, target string, opts
 
 func FormatComprehensiveReport(domain string, results map[string]string, order []string) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Comprehensive Report for: %s\n", domain))
+	fmt.Fprintf(&b, "Comprehensive Report for: %s\n", domain)
 	b.WriteString(strings.Repeat("=", 40+len(domain)))
 	b.WriteString("\n")
 
@@ -103,7 +103,7 @@ func FormatComprehensiveReport(domain string, results map[string]string, order [
 
 	for _, name := range order {
 		if result, ok := results[name]; ok {
-			b.WriteString(fmt.Sprintf("\n--- %s ---\n", name))
+			fmt.Fprintf(&b, "\n--- %s ---\n", name)
 			b.WriteString(strings.TrimSpace(result))
 			b.WriteString("\n")
 			processed[name] = true
@@ -119,7 +119,7 @@ func FormatComprehensiveReport(domain string, results map[string]string, order [
 	sort.Strings(remainingNames)
 	for _, name := range remainingNames {
 		result := results[name]
-		b.WriteString(fmt.Sprintf("\n--- %s ---\n", name))
+		fmt.Fprintf(&b, "\n--- %s ---\n", name)
 		b.WriteString(strings.TrimSpace(result))
 		b.WriteString("\n")
 	}

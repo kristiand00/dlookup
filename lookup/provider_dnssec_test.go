@@ -21,7 +21,6 @@ func fixedNow(t *testing.T, now time.Time) {
 type signedZone struct {
 	ksk, zsk         *dns.DNSKEY
 	kskPriv, zskPriv crypto.Signer
-	soa              dns.RR
 }
 
 func newKey(t *testing.T, flags uint16, alg uint8, bits int) (*dns.DNSKEY, crypto.Signer) {

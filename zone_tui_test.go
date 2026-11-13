@@ -206,7 +206,9 @@ func TestZoneConvertDialogFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	jin := filepath.Join(dir, "zone.json")
-	os.WriteFile(jin, []byte(buf.String()), 0o644)
+	if err := os.WriteFile(jin, []byte(buf.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	out = filepath.Join(dir, "out", "cf.json")
 	m, _ = submitZone(t, m, map[string]string{"in": jin, "to": "cloudflare", "out": out})
 	expectDialog(t, m, dlgInfo)
@@ -232,7 +234,9 @@ func TestZoneConvertDialogFlow(t *testing.T) {
 
 func TestZoneShowDialogFlow(t *testing.T) {
 	in := filepath.Join(t.TempDir(), "example.com.zone")
-	os.WriteFile(in, []byte(testZoneFile), 0o644)
+	if err := os.WriteFile(in, []byte(testZoneFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	m := startedModel(t, "a.test")
 	m = openZoneItem(t, m, "s", actZoneShow, dlgZoneShow)
 	m, msgs := submitZone(t, m, map[string]string{"file": in})

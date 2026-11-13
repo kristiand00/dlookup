@@ -54,7 +54,3 @@ func clickZone(t *testing.T, id string, dx int) tea.MouseMsg {
 	}
 	return mouseAt(x+dx, y, tea.MouseButtonLeft, tea.MouseActionPress)
 }
-
-func zoneAt(t *testing.T, id string) tea.MouseMsg {
-	return clickZone(t, id, 0)
-}

@@ -91,7 +91,7 @@ func (t TabBar) layout(tabs []Tab, active, width int) (tw, start, end int) {
 	// Scrolling: titles keep a readable cap; reserve room for indicators.
 	tw = min(maxT, tabScrollTitle)
 	avail -= ansi.StringWidth(tabScrollL) + ansi.StringWidth(tabScrollR)
-	start, end = 0, 0
+	end = 0
 	for end < n && rangeWidth(tabs, 0, end+1, tw) <= avail {
 		end++
 	}

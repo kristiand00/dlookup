@@ -27,8 +27,8 @@ func writeDNSControl(w io.Writer, z *Zone, wr *writer) error {
 	}
 	domain := strings.TrimSuffix(z.Origin, ".")
 	fmt.Fprintf(bw, "// DNS records of %s, written by dlookup.\n", domain)
-	bw.WriteString("// Replace REG_NONE and DSP_NONE with your registrar and DNS provider.\n")
-	bw.WriteString("var REG_NONE = NewRegistrar(\"none\");\nvar DSP_NONE = NewDnsProvider(\"none\");\n\n")
+	_, _ = bw.WriteString("// Replace REG_NONE and DSP_NONE with your registrar and DNS provider.\n")
+	_, _ = bw.WriteString("var REG_NONE = NewRegistrar(\"none\");\nvar DSP_NONE = NewDnsProvider(\"none\");\n\n")
 	fmt.Fprintf(bw, "D(%s, REG_NONE, DnsProvider(DSP_NONE),\n", jsString(domain))
 	fmt.Fprintf(bw, "    DefaultTTL(%d),\n", defTTL)
 	for _, r := range z.Records {
@@ -49,7 +49,7 @@ func writeDNSControl(w io.Writer, z *Zone, wr *writer) error {
 		}
 		fmt.Fprintf(bw, "    %s,\n", call)
 	}
-	bw.WriteString("END);\n")
+	_, _ = bw.WriteString("END);\n")
 	return bw.Flush()
 }
 

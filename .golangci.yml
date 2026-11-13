@@ -9,6 +9,9 @@ linters:
     - misspell
     - staticcheck
     - unused
+  exclusions:
+    presets:
+      - std-error-handling
 
 formatters:
   enable:

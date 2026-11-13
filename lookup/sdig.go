@@ -627,7 +627,7 @@ func pdnsZoneRep(rr dns.RR) string {
 	if h.Rrtype == dns.TypeOPT {
 		class = dns.ClassINET // class is the buffer size for OPT
 	}
-	if class != dns.ClassINET && !(class == dns.ClassCHAOS && h.Rrtype == dns.TypeTXT) {
+	if class != dns.ClassINET && (class != dns.ClassCHAOS || h.Rrtype != dns.TypeTXT) {
 		return unknownRep(raw)
 	}
 	if _, isRFC3597 := rr.(*dns.RFC3597); isRFC3597 {

@@ -129,7 +129,6 @@ func cutLine(line string, x, w int) (left, mid, right string) {
 	// Line ended before reaching the cuts: pad.
 	if col < x {
 		lb.WriteString(strings.Repeat(" ", x-col))
-		col = x
 	}
 	if mw := ansi.StringWidth(mb.String()); mw < w {
 		mb.WriteString(strings.Repeat(" ", w-mw))

@@ -172,10 +172,10 @@ func (p *DelegationProvider) Execute(ctx context.Context, target string, opts Op
 	}
 
 	// Count.
-	switch n := len(nsNames); {
-	case n == 0:
+	switch n := len(nsNames); n {
+	case 0:
 		r.bad("no nameservers found")
-	case n == 1:
+	case 1:
 		r.bad("only 1 nameserver (at least 2 are required, RFC 1034)")
 	default:
 		r.ok("%d nameservers (at least 2 required)", n)

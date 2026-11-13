@@ -386,7 +386,7 @@ func (m tabModel) Update(msg tea.Msg) (tabModel, tea.Cmd) {
 		m.lastUpdated = now()
 		m.state = stateViewResults
 		m.renderContent()
-		if !(m.isWatching && wasVisible) {
+		if !m.isWatching || !wasVisible {
 			m.viewport.GotoTop()
 		}
 

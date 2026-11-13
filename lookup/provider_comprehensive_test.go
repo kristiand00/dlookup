@@ -95,7 +95,7 @@ func TestFormatComprehensiveReport(t *testing.T) {
 		if indexC == -1 || indexA == -1 || indexB == -1 {
 			t.Fatalf("Not all provider headers found in output. Got:\n%s", output)
 		}
-		if !(indexC < indexA && indexA < indexB) {
+		if indexC >= indexA || indexA >= indexB {
 			t.Errorf("Output not in specified order. C at %d, A at %d, B at %d. Got:\n%s", indexC, indexA, indexB, output)
 		}
 	})
@@ -299,7 +299,7 @@ func TestComprehensiveReportProvider_Execute(t *testing.T) {
 		idxFailure := strings.Index(output, "--- CompTestMock-Failure ---")
 		idxSuccess := strings.Index(output, "--- CompTestMock-Success ---")
 
-		if !(idxAnotherSuccess < idxFailure && idxFailure < idxSuccess) {
+		if idxAnotherSuccess >= idxFailure || idxFailure >= idxSuccess {
 			t.Errorf("Ad-hoc providers not in expected alphabetical order. AnotherSuccess: %d, Failure: %d, Success: %d. Output:\n%s", idxAnotherSuccess, idxFailure, idxSuccess, output)
 		}
 	})

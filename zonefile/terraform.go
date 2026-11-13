@@ -70,7 +70,7 @@ func (n resourceNamer) name(owner, origin, typ string) string {
 	}
 	s := nonIdent.ReplaceAllString(strings.ToLower(strings.TrimSuffix(rel, ".")+"_"+typ), "_")
 	s = strings.Trim(multiUnderscore.ReplaceAllString(s, "_"), "_-")
-	if s == "" || !(s[0] >= 'a' && s[0] <= 'z' || s[0] == '_') {
+	if s == "" || (s[0] < 'a' || s[0] > 'z') && s[0] != '_' {
 		s = "r_" + s
 	}
 	n[s]++
@@ -138,13 +138,13 @@ func writeTerraformAWS(w io.Writer, z *Zone, wr *writer) error {
 		}
 		writeAttrs(bw, "  ", attrs)
 		if a := s.AliasTarget; a != nil {
-			bw.WriteString("\n  alias {\n")
+			_, _ = bw.WriteString("\n  alias {\n")
 			writeAttrs(bw, "    ", []hclAttr{
 				{"name", hclString(a.DNSName)},
 				{"zone_id", hclString(a.HostedZoneId)},
 				{"evaluate_target_health", strconv.FormatBool(a.EvaluateTargetHealth)},
 			})
-			bw.WriteString("  }\n")
+			_, _ = bw.WriteString("  }\n")
 		}
 		if s.Weight != nil {
 			fmt.Fprintf(bw, "\n  weighted_routing_policy {\n    weight = %d\n  }\n", *s.Weight)
@@ -155,7 +155,7 @@ func writeTerraformAWS(w io.Writer, z *Zone, wr *writer) error {
 		if s.Failover != "" {
 			fmt.Fprintf(bw, "\n  failover_routing_policy {\n    type = %s\n  }\n", hclString(s.Failover))
 		}
-		bw.WriteString("}\n")
+		_, _ = bw.WriteString("}\n")
 	}
 	return bw.Flush()
 }
@@ -205,11 +205,11 @@ func writeTerraformCloudflare(w io.Writer, z *Zone, wr *writer) error {
 					da = append(da, hclAttr{k, fmt.Sprint(v)})
 				}
 			}
-			bw.WriteString("  data = {\n")
+			_, _ = bw.WriteString("  data = {\n")
 			writeAttrs(bw, "    ", da)
-			bw.WriteString("  }\n")
+			_, _ = bw.WriteString("  }\n")
 		}
-		bw.WriteString("}\n")
+		_, _ = bw.WriteString("}\n")
 	}
 	return bw.Flush()
 }

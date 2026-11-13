@@ -567,7 +567,7 @@ func (m mainModel) tabInfos() []ui.Tab {
 		case t.isWatching:
 			badge = "◉"
 		}
-		out[i] = ui.Tab{Title: title, Badge: badge, Closable: !(t.isHome() && len(m.tabs) == 1)}
+		out[i] = ui.Tab{Title: title, Badge: badge, Closable: !t.isHome() || len(m.tabs) != 1}
 	}
 	return out
 }

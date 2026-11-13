@@ -319,9 +319,10 @@ func (m *mainModel) openZoneDiffDialog(tabID int, domain string, f zoneDiffForm)
 	cmd := m.openDialog(dlgZoneDiff, tabID, m.newZoneDiffDialog(domain, f))
 	if domain != "" {
 		_, newSrc := f.sources()
-		if newSrc == zdSrcFile {
+		switch newSrc {
+		case zdSrcFile:
 			m.dialog.FocusField("newfile")
-		} else if newSrc == zdSrcServer {
+		case zdSrcServer:
 			m.dialog.FocusField("new")
 		}
 	}
