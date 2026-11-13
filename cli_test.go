@@ -257,3 +257,19 @@ func TestRunUsageErrorExitCode(t *testing.T) {
 		t.Errorf("exit code = %d, want 2", code)
 	}
 }
+
+func TestSplitTargetsLists(t *testing.T) {
+	got := splitTargets(" a.com, b.net;c.org  d.hr,\te.info ,")
+	want := []string{"a.com", "b.net", "c.org", "d.hr", "e.info"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("splitTargets = %q", got)
+	}
+	cfg, err := parseArgs([]string{"a.example,", "b.example,c.example"}, strings.NewReader(""), &bytes.Buffer{})
+	if err != nil || strings.Join(cfg.Targets, " ") != "a.example b.example c.example" {
+		t.Fatalf("targets %q err %v", cfg.Targets, err)
+	}
+	cfg, err = parseArgs([]string{"-"}, strings.NewReader("x.example, y.example\nz.example\n"), &bytes.Buffer{})
+	if err != nil || strings.Join(cfg.Targets, " ") != "x.example y.example z.example" {
+		t.Fatalf("stdin targets %q err %v", cfg.Targets, err)
+	}
+}

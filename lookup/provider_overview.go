@@ -100,6 +100,11 @@ func (p *OverviewProvider) Execute(ctx context.Context, target string, opts Opti
 	}
 
 	var b strings.Builder
+	if len(values) == 0 && isNXDomain(primary.err) {
+		// One clear line instead of the same NXDOMAIN for every record type.
+		fmt.Fprintf(&b, "Domain %s does not exist (NXDOMAIN): not registered, expired or not delegated. Try the RDAP lookup.", name)
+		return b.String(), nil
+	}
 	if len(values) == 0 {
 		fmt.Fprintf(&b, "No results found for %s with record type %s.", name, typeName)
 		if primary.err != nil {

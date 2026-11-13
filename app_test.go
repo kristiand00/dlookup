@@ -941,3 +941,28 @@ func TestTruncateUnicode(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupDialogListOpensTabEach(t *testing.T) {
+	m := homeModel(t, DefaultConfig())
+	m, _ = typeKeys(t, m, "n")
+	expectDialog(t, m, dlgLookup)
+	m.dialog.SetValue("domain", "a.example, b.example c.example")
+	m.dialog.SetValue("type", tuiFakeName)
+	m.submitDialog(ui.DialogResult{Action: btnRun, Values: m.dialog.Values()})
+	if m.dlg != dlgNone {
+		t.Fatalf("dialog still open: %q", m.dialog.Err)
+	}
+	var domains []string
+	for _, tab := range m.tabs {
+		if !tab.isHome() {
+			domains = append(domains, tab.domain+"/"+tab.lookupType)
+		}
+	}
+	want := "a.example/" + tuiFakeName + " b.example/" + tuiFakeName + " c.example/" + tuiFakeName
+	if strings.Join(domains, " ") != want {
+		t.Fatalf("tabs %v", domains)
+	}
+	if err := validateTargetsField("a.example, -bad"); err == nil {
+		t.Error("invalid entry in a list must fail validation")
+	}
+}

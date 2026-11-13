@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"dlookup/lookup"
 )
@@ -236,12 +237,13 @@ func parseArgs(args []string, stdin io.Reader, stderr io.Writer) (*cliConfig, er
 			cfg.Targets = append(cfg.Targets, targets...)
 			continue
 		}
-		target := strings.TrimSpace(arg)
-		if err := validateTarget(target); err != nil {
-			fmt.Fprintf(stderr, "Warning: argument %d: skipping invalid target %q: %v\n", i+1, arg, err)
-			continue
+		for _, target := range splitTargets(arg) {
+			if err := validateTarget(target); err != nil {
+				fmt.Fprintf(stderr, "Warning: argument %d: skipping invalid target %q: %v\n", i+1, target, err)
+				continue
+			}
+			cfg.Targets = append(cfg.Targets, target)
 		}
-		cfg.Targets = append(cfg.Targets, target)
 	}
 
 	if cfg.Headless() {
@@ -430,6 +432,14 @@ func readTargetsFile(path string, stderr io.Writer) ([]string, error) {
 
 // readTargets reads one target per line, skipping blank lines and '#' comments.
 // Invalid targets are skipped with a "name:line" warning written to stderr.
+// splitTargets splits a list of targets separated by commas, semicolons or
+// whitespace, e.g. "a.com, b.com c.com".
+func splitTargets(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ';' || unicode.IsSpace(r)
+	})
+}
+
 func readTargets(r io.Reader, name string, stderr io.Writer) ([]string, error) {
 	var targets []string
 	scanner := bufio.NewScanner(r)
@@ -440,11 +450,13 @@ func readTargets(r io.Reader, name string, stderr io.Writer) ([]string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if err := validateTarget(line); err != nil {
-			fmt.Fprintf(stderr, "Warning: %s:%d: skipping invalid target %q: %v\n", name, lineNo, line, err)
-			continue
+		for _, target := range splitTargets(line) {
+			if err := validateTarget(target); err != nil {
+				fmt.Fprintf(stderr, "Warning: %s:%d: skipping invalid target %q: %v\n", name, lineNo, target, err)
+				continue
+			}
+			targets = append(targets, target)
 		}
-		targets = append(targets, line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading '%s': %w", name, err)

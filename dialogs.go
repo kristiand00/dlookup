@@ -70,6 +70,21 @@ func (m mainModel) defaultLookupType() string {
 	return ""
 }
 
+// validateTargetsField accepts one target or a list separated by commas,
+// semicolons or spaces.
+func validateTargetsField(s string) error {
+	targets := splitTargets(s)
+	if len(targets) == 0 {
+		return validateTargetField(s)
+	}
+	for _, t := range targets {
+		if err := validateTargetField(t); err != nil {
+			return fmt.Errorf("%s: %w", t, err)
+		}
+	}
+	return nil
+}
+
 func validateTargetField(s string) error {
 	if err := lookup.ValidateTarget(strings.TrimSpace(s)); err != nil {
 		return fmt.Errorf("invalid target: %w", err)
@@ -139,7 +154,7 @@ func sdigQTypeOptions(cur string) []ui.Option {
 // only shown when lookupType is SDIG (the dialog is rebuilt when it changes).
 func lookupDialogFields(domain, lookupType, server string, opts lookup.Options) []ui.Field {
 	fields := []ui.Field{
-		{Key: "domain", Label: "Domain/IP", Kind: ui.FieldText, Value: domain, Placeholder: "example.com or 1.1.1.1", Validate: validateTargetField, CharLimit: lookup.MaxTargetLength},
+		{Key: "domain", Label: "Domain/IP", Kind: ui.FieldText, Value: domain, Placeholder: "example.com, 1.1.1.1 (a list opens a tab each)", Validate: validateTargetsField, CharLimit: 4096},
 		{Key: "type", Label: "Lookup", Kind: ui.FieldSelect, Value: lookupType, Options: lookupTypeOptions()},
 		{Key: "server", Label: "DNS server", Kind: ui.FieldText, Value: server, Placeholder: "system default", Validate: validateOptionalServer, CharLimit: 128},
 	}
@@ -532,12 +547,16 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 	}
 	switch m.dlg {
 	case dlgLookup:
-		domain := strings.TrimSpace(v["domain"])
-		if err := validateTargetField(domain); err != nil {
+		if err := validateTargetsField(v["domain"]); err != nil {
 			return fail(err)
 		}
+		domains := splitTargets(v["domain"])
+		domain := domains[0]
 		typ := v["type"]
 		if typ == zoneDiffName {
+			if len(domains) > 1 {
+				return fail(fmt.Errorf("zone diff takes one domain"))
+			}
 			return m.switchToZoneDiff(domain)
 		}
 		if _, ok := lookup.GetProvider(typ); !ok {
@@ -559,9 +578,15 @@ func (m *mainModel) submitDialog(res ui.DialogResult) tea.Cmd {
 		}
 		m.closeDialog()
 		m.lastLookupType = typ
-		cmd := m.tabs[i].run(domain, typ, opts)
-		m.focus(i)
-		return cmd
+		cmds := []tea.Cmd{m.tabs[i].run(domain, typ, opts)}
+		first := i
+		// Further targets in a list each get a new tab with the same lookup.
+		for _, d := range domains[1:] {
+			j := m.targetTab(-1)
+			cmds = append(cmds, m.tabs[j].run(d, typ, opts))
+		}
+		m.focus(first)
+		return tea.Batch(cmds...)
 
 	case dlgZoneDiff:
 		form := zoneDiffFormFromValues(v, m.zoneDiffTabForm())
